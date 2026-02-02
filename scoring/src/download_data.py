@@ -3,6 +3,7 @@
 import gzip
 import shutil
 import tempfile
+import zipfile
 from pathlib import Path
 
 import requests
@@ -42,10 +43,17 @@ def decompress_gzip_inplace(file_path: Path) -> None:
     shutil.move(tmp_path, file_path)
 
 
+def extract_zip_to_dir(zip_path: Path, dest_dir: Path) -> None:
+    """Extract a zip file into dest_dir, then remove the zip."""
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(dest_dir)
+    zip_path.unlink()
+
+
 def build_ratings_urls(date: str, num_files: int) -> list[str]:
     """Build a list of ratings file URLs for the given date."""
     return [
-        f"{BASE_URL}/{date}/noteRatings/ratings-{i:05d}.tsv"
+        f"{BASE_URL}/{date}/noteRatings/ratings-{i:05d}.zip"
         for i in range(num_files)
     ]
 
@@ -61,27 +69,28 @@ def download_data(date: str, num_ratings_files: int = 20) -> None:
     output_dir = SCRIPT_DIR / "data"
     output_dir.mkdir(exist_ok=True)
 
-    # Regular TSV files
-    tsv_urls = [
-        f"{BASE_URL}/{date}/notes/notes-00000.tsv",
-        f"{BASE_URL}/{date}/noteStatusHistory/noteStatusHistory-00000.tsv",
-        f"{BASE_URL}/{date}/userEnrollment/userEnrollment-00000.tsv",
+    # Main data files (served as .zip; we extract to get .tsv)
+    zip_urls = [
+        f"{BASE_URL}/{date}/notes/notes-00000.zip",
+        f"{BASE_URL}/{date}/noteStatusHistory/noteStatusHistory-00000.zip",
+        f"{BASE_URL}/{date}/userEnrollment/userEnrollment-00000.zip",
     ]
 
     print(f"Downloading data for {date} to {output_dir}")
 
-    # Download regular TSV files
-    for url in tsv_urls:
+    for url in zip_urls:
         filename = url.split("/")[-1]
         destination = output_dir / filename
         print(f"  Downloading {filename}...")
-        download_file(url, destination)
+        if download_file(url, destination):
+            extract_zip_to_dir(destination, output_dir)
+            print(f"    Extracted {filename}")
 
     # Create ratings subdirectory
     ratings_dir = output_dir / "ratings"
     ratings_dir.mkdir(exist_ok=True)
 
-    # Download and process ratings files (potentially gzipped)
+    # Download and process ratings files (.zip or legacy .tsv / .tsv.gz)
     ratings_urls = build_ratings_urls(date, num_ratings_files)
     for url in ratings_urls:
         filename = url.split("/")[-1]
@@ -89,7 +98,10 @@ def download_data(date: str, num_ratings_files: int = 20) -> None:
         print(f"  Downloading {filename}...")
 
         if download_file(url, destination):
-            if is_gzipped(destination):
+            if destination.suffix == ".zip":
+                extract_zip_to_dir(destination, ratings_dir)
+                print(f"    Extracted {filename}")
+            elif is_gzipped(destination):
                 decompress_gzip_inplace(destination)
                 print(f"    Decompressed {filename}")
 
