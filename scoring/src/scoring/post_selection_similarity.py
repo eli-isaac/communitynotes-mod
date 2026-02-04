@@ -32,15 +32,18 @@ class PostSelectionSimilarity:
     self.affinityAndCoverage = self.compute_affinity_and_coverage(helpfulRatings, notes, [1, 5, 20])
     logger.info(f"Computed rater affinity and writer coverage for {len(self.affinityAndCoverage)} pairs")
     self.suspectPairs = self.get_suspect_pairs(self.affinityAndCoverage)
+    logger.info(f"Found {len(self.suspectPairs)} suspect pairs")
 
     # Compute MinSim and NPMI
     self.ratings = _preprocess_ratings(notes, ratings)
+    logger.info(f"Preprocessed ratings for {len(self.ratings)} ratings")
     with c.time_block("Compute pair counts dict"):
       self.pairCountsDict = _get_pair_counts_dict(self.ratings, windowMillis=windowMillis)
-
+    logger.info(f"Computed pair counts dict for {len(self.pairCountsDict)} pairs")
     self.uniqueRatingsOnTweets = self.ratings[
       [c.tweetIdKey, c.raterParticipantIdKey]
     ].drop_duplicates()
+    logger.info(f"Computed unique ratings on tweets for {len(self.uniqueRatingsOnTweets)} ratings")
     raterTotals = self.uniqueRatingsOnTweets[c.raterParticipantIdKey].value_counts()
     raterTotalsDict = {
       index: value for index, value in raterTotals.items() if value >= minUniquePosts
@@ -56,7 +59,7 @@ class PostSelectionSimilarity:
       minimumRatingProportionThreshold=minimumRatingProportionThreshold,
     )
     self.suspectPairs = set(self.suspectPairs + list(self.pairCountsDict.keys()))
-
+    logger.info(f"Computed suspect pairs for {len(self.suspectPairs)} pairs")
   # Define helper to get affinity and coverage for a pair over a time window
   def _compute_affinity_and_coverage(self, ratings, notes, latencyMins, minDenom):
     # Identify ratings subset
@@ -174,7 +177,7 @@ class PostSelectionSimilarity:
     postSelectionSimilarityValue is None by default.
     """
     cliqueToUserMap, userToCliqueMap = aggregate_into_cliques(self.suspectPairs)
-
+    logger.info(f"Aggregated into {len(cliqueToUserMap)} cliques")
     # Convert dict to pandas dataframe
     cliquesDfList = []
     for cliqueId in cliqueToUserMap.keys():
@@ -183,6 +186,7 @@ class PostSelectionSimilarity:
     cliquesDf = pd.DataFrame(
       cliquesDfList, columns=[c.raterParticipantIdKey, c.postSelectionValueKey]
     )
+    logger.info(f"Computed cliques dataframe for {len(cliquesDf)} cliques")
     return cliquesDf
 
 
