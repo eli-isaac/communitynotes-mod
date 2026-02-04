@@ -623,9 +623,11 @@ class LocalDataLoader(CommunityNotesDataLoader):
       self.userEnrollmentPath,
       self.headers,
     )
+    logger.info(f"Read notes for {len(notes)} notes")
     notes, ratings, noteStatusHistory = preprocess_data(
       notes, ratings, noteStatusHistory, self.shouldFilterNotMisleadingNotes, self.log
     )
+    logger.info(f"Preprocessed notes for {len(notes)} notes")
     return notes, ratings, noteStatusHistory, userEnrollment
 
   def get_prescoring_model_output(
