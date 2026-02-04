@@ -107,14 +107,15 @@ def download_data(date: str, num_ratings_files: int = 20) -> None:
 
 if __name__ == "__main__":
     import argparse
-    from datetime import date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
     parser = argparse.ArgumentParser(description="Download Community Notes public data")
     parser.add_argument(
         "date",
         nargs="?",
-        default=date.today().strftime("%Y/%m/%d"),
-        help="Date in YYYY/MM/DD format (default: today)",
+        default=datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y/%m/%d"),
+        help="Date in YYYY/MM/DD format (default: today in California)",
     )
     parser.add_argument(
         "--num-ratings-files",
