@@ -53,8 +53,7 @@ def extract_zip_to_dir(zip_path: Path, dest_dir: Path) -> None:
 def build_ratings_urls(date: str, num_files: int) -> list[str]:
     """Build a list of ratings file URLs for the given date."""
     return [
-        f"{BASE_URL}/{date}/noteRatings/ratings-{i:05d}.zip"
-        for i in range(num_files)
+        f"{BASE_URL}/{date}/noteRatings/ratings-{i:05d}.zip" for i in range(num_files)
     ]
 
 
@@ -108,9 +107,15 @@ def download_data(date: str, num_ratings_files: int = 20) -> None:
 
 if __name__ == "__main__":
     import argparse
+    from datetime import date
 
     parser = argparse.ArgumentParser(description="Download Community Notes public data")
-    parser.add_argument("date", help="Date in YYYY/MM/DD format (e.g., 2024/03/07)")
+    parser.add_argument(
+        "date",
+        nargs="?",
+        default=date.today().strftime("%Y/%m/%d"),
+        help="Date in YYYY/MM/DD format (default: today)",
+    )
     parser.add_argument(
         "--num-ratings-files",
         type=int,
