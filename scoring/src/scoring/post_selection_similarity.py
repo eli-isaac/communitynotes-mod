@@ -26,8 +26,11 @@ class PostSelectionSimilarity:
     windowMillis: int = 1000 * 60 * 20,
   ):
     # Compute rater affinity and writer coverage.  Apply thresholds to identify linked pairs.
+    logger.info("Computing rater affinity and writer coverage")
     helpfulRatings = ratings[ratings[c.helpfulnessLevelKey] == c.helpfulValueTsv]
+    logger.info(f"Computing rater affinity and writer coverage for {len(helpfulRatings)} helpful ratings")
     self.affinityAndCoverage = self.compute_affinity_and_coverage(helpfulRatings, notes, [1, 5, 20])
+    logger.info(f"Computed rater affinity and writer coverage for {len(self.affinityAndCoverage)} pairs")
     self.suspectPairs = self.get_suspect_pairs(self.affinityAndCoverage)
 
     # Compute MinSim and NPMI
