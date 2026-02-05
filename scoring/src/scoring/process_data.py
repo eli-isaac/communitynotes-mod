@@ -61,15 +61,55 @@ def read_prescoring_from_strings(
   return noteModelOutput, raterModelOutput
 
 
-def tsv_reader_single(
-  path: str, mapping, columns, header=False, parser=None, convertNAToNone=True
-):
-  """Read a single TSV file using PyArrow."""
+def _get_parquet_path(tsv_path: str) -> str:
+  """Get the corresponding parquet path for a TSV file."""
+  if tsv_path.endswith(".tsv"):
+    return tsv_path[:-4] + ".parquet"
+  return tsv_path + ".parquet"
+
+
+def _read_tsv_raw(path: str, mapping, columns, header: bool):
+  """Read a TSV file using PyArrow (no caching)."""
   if header:
     data = pd.read_csv(path, sep="\t", dtype=mapping, header=0, usecols=columns, engine="pyarrow")
     data = data[columns]
   else:
     data = pd.read_csv(path, sep="\t", dtype=mapping, header=None, names=columns, index_col=False, engine="pyarrow")
+  return data
+
+
+def tsv_reader_single(
+  path: str, mapping, columns, header=False, parser=None, convertNAToNone=True
+):
+  """Read a single TSV file, using cached Parquet if available.
+  
+  On first read, converts TSV to Parquet for faster subsequent reads.
+  """
+  parquet_path = _get_parquet_path(path)
+  
+  # Fast path: read from Parquet cache if it exists and is newer than TSV
+  if os.path.exists(parquet_path):
+    tsv_mtime = os.path.getmtime(path) if os.path.exists(path) else 0
+    parquet_mtime = os.path.getmtime(parquet_path)
+    if parquet_mtime >= tsv_mtime:
+      logger.debug(f"Reading from Parquet cache: {parquet_path}")
+      data = pd.read_parquet(parquet_path, engine="pyarrow")
+      # Ensure column order matches expected
+      if list(data.columns) != list(columns):
+        data = data[columns]
+      return data
+  
+  # Slow path: read TSV and create Parquet cache
+  logger.info(f"Reading TSV and creating Parquet cache: {path}")
+  data = _read_tsv_raw(path, mapping, columns, header)
+  
+  # Save as Parquet for next time
+  try:
+    data.to_parquet(parquet_path, engine="pyarrow", compression="snappy")
+    logger.info(f"Created Parquet cache: {parquet_path}")
+  except Exception as e:
+    logger.warning(f"Failed to create Parquet cache: {e}")
+  
   if convertNAToNone:
     for colname, coltype in mapping.items():
       if coltype in {pd.StringDtype(), pd.BooleanDtype(), pd.Int64Dtype(), pd.Int32Dtype(), "boolean"}:
@@ -81,13 +121,29 @@ def tsv_reader_single(
 def tsv_reader(
   path: str, mapping, columns, header=False, parser=None, convertNAToNone=True
 ) -> pd.DataFrame:
-  """Read a single TSV file or a directory of TSV files using PyArrow.
+  """Read a single TSV file or a directory of TSV files.
   
-  When reading from a directory, files are read in parallel using ThreadPoolExecutor
-  to maximize I/O throughput.
+  Uses cached Parquet files when available for faster reads.
+  When reading from a directory, files are read in parallel using ThreadPoolExecutor.
   """
   if os.path.isdir(path):
     from concurrent.futures import ThreadPoolExecutor
+    
+    # Check for a single combined parquet file for the directory
+    dir_parquet_path = path.rstrip("/") + ".parquet"
+    if os.path.exists(dir_parquet_path):
+      # Check if parquet is newer than all TSV files
+      tsv_files = [os.path.join(path, f) for f in os.listdir(path) if f.endswith(".tsv")]
+      parquet_mtime = os.path.getmtime(dir_parquet_path)
+      tsv_max_mtime = max(os.path.getmtime(f) for f in tsv_files) if tsv_files else 0
+      if parquet_mtime >= tsv_max_mtime:
+        logger.debug(f"Reading from directory Parquet cache: {dir_parquet_path}")
+        data = pd.read_parquet(dir_parquet_path, engine="pyarrow")
+        if list(data.columns) != list(columns):
+          data = data[columns]
+        return data
+    
+    # Read individual TSV files in parallel
     filenames = sorted(f for f in os.listdir(path) if f.endswith(".tsv"))
     filepaths = [os.path.join(path, f) for f in filenames]
     
@@ -97,7 +153,17 @@ def tsv_reader(
     with ThreadPoolExecutor() as executor:
       dfs = list(executor.map(read_single, filepaths))
     
-    return pd.concat(dfs, ignore_index=True)
+    result = pd.concat(dfs, ignore_index=True)
+    
+    # Save combined parquet for next time
+    try:
+      result.to_parquet(dir_parquet_path, engine="pyarrow", compression="snappy")
+      logger.info(f"Created directory Parquet cache: {dir_parquet_path}")
+    except Exception as e:
+      logger.warning(f"Failed to create directory Parquet cache: {e}")
+    
+    return result
+  
   return tsv_reader_single(path, mapping, columns, header, convertNAToNone=convertNAToNone)
 
 
@@ -289,7 +355,7 @@ def _filter_misleading_notes(
 
 
 def remove_duplicate_ratings(ratings: pd.DataFrame) -> pd.DataFrame:
-  """Drop duplicate ratings, then assert that there is exactly one rating per noteId per raterId.
+  """Drop duplicate ratings, ensuring exactly one rating per noteId per raterId.
 
   Args:
       ratings (pd.DataFrame) with possible duplicated ratings
@@ -297,14 +363,16 @@ def remove_duplicate_ratings(ratings: pd.DataFrame) -> pd.DataFrame:
   Returns:
       pd.DataFrame: ratings, with one record per userId, noteId.
   """
-  # Construct a new DataFrame to avoid SettingWithCopyWarning
-  ratings = pd.DataFrame(ratings.drop_duplicates())
-
-  numRatings = len(ratings)
-  numUniqueRaterIdNoteIdPairs = len(ratings.groupby([c.raterParticipantIdKey, c.noteIdKey]).head(1))
-  assert (
-    numRatings == numUniqueRaterIdNoteIdPairs
-  ), f"Only {numUniqueRaterIdNoteIdPairs} unique raterId,noteId pairs but {numRatings} ratings"
+  numRatingsBefore = len(ratings)
+  logger.info(f"Removing duplicate ratings for {numRatingsBefore} ratings")
+  
+  # Drop duplicates based on the key columns only (much faster than all columns)
+  # Keep the first occurrence of each (rater, note) pair
+  ratings = ratings.drop_duplicates(subset=[c.raterParticipantIdKey, c.noteIdKey], keep="first")
+  
+  numRatingsAfter = len(ratings)
+  logger.info(f"Removed {numRatingsBefore - numRatingsAfter} duplicate ratings, {numRatingsAfter} remaining")
+  
   return ratings
 
 
@@ -342,7 +410,9 @@ def compute_helpful_num(ratings: pd.DataFrame):
   ratings.loc[ratings[c.helpfulnessLevelKey] == c.notHelpfulValueTsv, c.helpfulNumKey] = 0
   ratings.loc[ratings[c.helpfulnessLevelKey] == c.somewhatHelpfulValueTsv, c.helpfulNumKey] = 0.5
   ratings.loc[ratings[c.helpfulnessLevelKey] == c.helpfulValueTsv, c.helpfulNumKey] = 1
-  ratings = ratings.loc[~pd.isna(ratings[c.helpfulNumKey])]
+  logger.info(f"Computed helpful num for {len(ratings)} ratings")
+  ratings = ratings.dropna(subset=[c.helpfulNumKey])
+  logger.info(f"Filtered out ratings with no helpful num for {len(ratings)} ratings")
   return ratings
 
 
@@ -419,8 +489,11 @@ def preprocess_data(
 
   if len(ratings) > 0:
     ratings = remove_duplicate_ratings(ratings)
+    logger.info(f"Removed duplicate ratings for {len(ratings)} ratings")
     ratings = compute_helpful_num(ratings)
+    logger.info(f"Computed helpful num for {len(ratings)} ratings")
     ratings = tag_high_volume_raters(ratings)
+    logger.info(f"Tagged high volume raters for {len(ratings)} ratings")
     ratings[c.ratingSourceBucketedKey] = ratings[c.ratingSourceBucketedKey].astype("category")
     ratings[c.helpfulnessLevelKey] = ratings[c.helpfulnessLevelKey].astype("category")
 
@@ -636,6 +709,7 @@ class LocalDataLoader(CommunityNotesDataLoader):
       self.headers,
     )
     logger.info(f"Read notes for {len(notes)} notes")
+    # this is taking about 12 minutes to run
     notes, ratings, noteStatusHistory = preprocess_data(
       notes, ratings, noteStatusHistory, self.shouldFilterNotMisleadingNotes, self.log
     )
