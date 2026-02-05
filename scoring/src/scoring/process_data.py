@@ -81,10 +81,22 @@ def tsv_reader_single(
 def tsv_reader(
   path: str, mapping, columns, header=False, parser=None, convertNAToNone=True
 ) -> pd.DataFrame:
-  """Read a single TSV file or a directory of TSV files using PyArrow."""
+  """Read a single TSV file or a directory of TSV files using PyArrow.
+  
+  When reading from a directory, files are read in parallel using ThreadPoolExecutor
+  to maximize I/O throughput.
+  """
   if os.path.isdir(path):
+    from concurrent.futures import ThreadPoolExecutor
     filenames = sorted(f for f in os.listdir(path) if f.endswith(".tsv"))
-    dfs = [tsv_reader_single(os.path.join(path, f), mapping, columns, header, convertNAToNone=convertNAToNone) for f in filenames]
+    filepaths = [os.path.join(path, f) for f in filenames]
+    
+    def read_single(filepath):
+      return tsv_reader_single(filepath, mapping, columns, header, convertNAToNone=convertNAToNone)
+    
+    with ThreadPoolExecutor() as executor:
+      dfs = list(executor.map(read_single, filepaths))
+    
     return pd.concat(dfs, ignore_index=True)
   return tsv_reader_single(path, mapping, columns, header, convertNAToNone=convertNAToNone)
 

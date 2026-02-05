@@ -16,7 +16,7 @@ logger = logging.getLogger("birdwatch.runner")
 logger.setLevel(logging.INFO)
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser("Community Notes Scoring")
   parser.add_argument(
     "--check-flips",
@@ -179,7 +179,7 @@ def parse_args():
 
 @patch_pandas
 def _run_scorer(
-  args=None,
+  args: argparse.Namespace,
   dataLoader=None,
   extraScoringArgs={},
 ):
