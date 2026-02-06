@@ -293,64 +293,56 @@ def _filter_misleading_notes(
   Returns:
       pd.DataFrame: filtered ratings
   """
-  ratings = ratings.merge(
-    noteStatusHistory[[c.noteIdKey, c.createdAtMillisKey, c.classificationKey]],
-    on=c.noteIdKey,
-    how="left",
-    suffixes=("", "_nsh"),
-    unsafeAllowed=c.createdAtMillisKey,
-  )
-
-  deletedNoteKey = "deletedNote"
-  notDeletedMisleadingKey = "notDeletedMisleading"
-  deletedButInNSHKey = "deletedButInNSH"
   createdAtMillisNSHKey = c.createdAtMillisKey + "_nsh"
 
-  ratings[deletedNoteKey] = pd.isna(ratings[c.classificationKey])
-  ratings[notDeletedMisleadingKey] = np.invert(ratings[deletedNoteKey]) & (
-    ratings[c.classificationKey] == c.notesSaysTweetIsMisleadingKey
-  )
-  ratings[deletedButInNSHKey] = ratings[deletedNoteKey] & np.invert(
-    pd.isna(ratings[createdAtMillisNSHKey])
-  )
+  # Use .map() instead of merge: NSH has unique noteIds, and we only need 2 columns.
+  # This avoids the full merge algorithm and the safe_merge type-checking wrapper.
+  nsh_index = noteStatusHistory.set_index(c.noteIdKey)
+  note_ids = ratings[c.noteIdKey]
+  ratings[c.classificationKey] = note_ids.map(nsh_index[c.classificationKey])
+  ratings[createdAtMillisNSHKey] = note_ids.map(nsh_index[c.createdAtMillisKey])
+  logger.info(f"Mapped note status history for {len(ratings)} ratings")
 
-  deletedNotInNSH = (ratings[deletedNoteKey]) & pd.isna(ratings[createdAtMillisNSHKey])
-  notDeletedNotMisleadingOldUI = (
-    ratings[c.classificationKey] == c.noteSaysTweetIsNotMisleadingKey
-  ) & (ratings[createdAtMillisNSHKey] <= c.notMisleadingUILaunchTime)
-  notDeletedNotMisleadingNewUI = (
-    ratings[c.classificationKey] == c.noteSaysTweetIsNotMisleadingKey
-  ) & (ratings[createdAtMillisNSHKey] > c.notMisleadingUILaunchTime)
+  # Cache column accesses and isna() results to avoid repeated lookups
+  classification = ratings[c.classificationKey]
+  created_nsh = ratings[createdAtMillisNSHKey]
+  is_deleted = pd.isna(classification)
+  is_nsh_missing = pd.isna(created_nsh)
+  is_not_misleading = classification == c.noteSaysTweetIsNotMisleadingKey
+
+  # Use local boolean Series instead of writing temporary columns to the DataFrame
+  logger.info(f"added deleted note key column")
+  not_deleted_misleading = ~is_deleted & (classification == c.notesSaysTweetIsMisleadingKey)
+  logger.info(f"added not deleted misleading key column")
+  deleted_but_in_nsh = is_deleted & ~is_nsh_missing
+  logger.info(f"added deleted but in note status history key column")
+  deleted_not_in_nsh = is_deleted & is_nsh_missing
+  logger.info(f"added deleted not in note status history column")
+  not_deleted_not_misleading_old_ui = is_not_misleading & (created_nsh <= c.notMisleadingUILaunchTime)
+  logger.info(f"added not deleted not misleading old UI column")
+  not_deleted_not_misleading_new_ui = is_not_misleading & (created_nsh > c.notMisleadingUILaunchTime)
+  logger.info(f"added not deleted not misleading new UI column")
 
   if log:
+    noteIds = ratings[c.noteIdKey]
     logger.info(
-      f"Preprocess Data: Filter misleading notes, starting with {len(ratings)} ratings on {len(np.unique(ratings[c.noteIdKey]))} notes"
+      f"Preprocess Data: Filter misleading notes, starting with {len(ratings)} ratings on {noteIds.nunique()} notes"
     )
     logger.info(
-      f"  Keeping {ratings[notDeletedMisleadingKey].sum()} ratings on {len(np.unique(ratings.loc[ratings[notDeletedMisleadingKey],c.noteIdKey]))} misleading notes"
+      f"  Keeping {not_deleted_misleading.sum()} ratings on {noteIds[not_deleted_misleading].nunique()} misleading notes"
     )
     logger.info(
-      f"  Keeping {ratings[deletedButInNSHKey].sum()} ratings on {len(np.unique(ratings.loc[ratings[deletedButInNSHKey],c.noteIdKey]))} deleted notes that were previously scored (in note status history)"
+      f"  Keeping {deleted_but_in_nsh.sum()} ratings on {noteIds[deleted_but_in_nsh].nunique()} deleted notes that were previously scored (in note status history)"
     )
     logger.info(
-      f"  Removing {notDeletedNotMisleadingOldUI.sum()} ratings on {len(np.unique(ratings.loc[notDeletedNotMisleadingOldUI, c.noteIdKey]))} older notes that aren't deleted, but are not-misleading."
+      f"  Removing {not_deleted_not_misleading_old_ui.sum()} ratings on {noteIds[not_deleted_not_misleading_old_ui].nunique()} older notes that aren't deleted, but are not-misleading."
     )
     logger.info(
-      f"  Removing {deletedNotInNSH.sum()} ratings on {len(np.unique(ratings.loc[deletedNotInNSH, c.noteIdKey]))} notes that were deleted and not in note status history (e.g. old)."
+      f"  Removing {deleted_not_in_nsh.sum()} ratings on {noteIds[deleted_not_in_nsh].nunique()} notes that were deleted and not in note status history (e.g. old)."
     )
 
-  ratings = ratings[
-    ratings[notDeletedMisleadingKey] | ratings[deletedButInNSHKey] | notDeletedNotMisleadingNewUI
-  ]
-  ratings = ratings.drop(
-    columns=[
-      createdAtMillisNSHKey,
-      c.classificationKey,
-      deletedNoteKey,
-      notDeletedMisleadingKey,
-      deletedButInNSHKey,
-    ]
-  )
+  mask = not_deleted_misleading | deleted_but_in_nsh | not_deleted_not_misleading_new_ui
+  ratings = ratings.loc[mask, ratings.columns.difference([createdAtMillisNSHKey, c.classificationKey])]
   return ratings
 
 
@@ -411,7 +403,7 @@ def compute_helpful_num(ratings: pd.DataFrame):
   ratings.loc[ratings[c.helpfulnessLevelKey] == c.somewhatHelpfulValueTsv, c.helpfulNumKey] = 0.5
   ratings.loc[ratings[c.helpfulnessLevelKey] == c.helpfulValueTsv, c.helpfulNumKey] = 1
   logger.info(f"Computed helpful num for {len(ratings)} ratings")
-  ratings = ratings.dropna(subset=[c.helpfulNumKey])
+  ratings = ratings[ratings[c.helpfulNumKey].notna()]
   logger.info(f"Filtered out ratings with no helpful num for {len(ratings)} ratings")
   return ratings
 
