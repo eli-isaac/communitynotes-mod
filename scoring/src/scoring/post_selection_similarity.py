@@ -27,19 +27,28 @@ class PostSelectionSimilarity:
   ):
     # Compute rater affinity and writer coverage.  Apply thresholds to identify linked pairs.
     logger.info("Computing rater affinity and writer coverage")
-    helpfulRatings = ratings[ratings[c.helpfulnessLevelKey] == c.helpfulValueTsv]
+    # this takes 14 seconds to run
+    helpful_mask = ratings[c.helpfulnessLevelKey] == c.helpfulValueTsv
+    helpfulRatings = ratings.loc[helpful_mask, [c.raterParticipantIdKey, c.noteIdKey, c.createdAtMillisKey]]
     logger.info(f"Computing rater affinity and writer coverage for {len(helpfulRatings)} helpful ratings")
+    # this takes 3.5 minutes to run
     self.affinityAndCoverage = self.compute_affinity_and_coverage(helpfulRatings, notes, [1, 5, 20])
     logger.info(f"Computed rater affinity and writer coverage for {len(self.affinityAndCoverage)} pairs")
+
+    # runs quickly
     self.suspectPairs = self.get_suspect_pairs(self.affinityAndCoverage)
     logger.info(f"Found {len(self.suspectPairs)} suspect pairs")
 
     # Compute MinSim and NPMI
+    # this takes 2.5 minutes to run
     self.ratings = _preprocess_ratings(notes, ratings)
     logger.info(f"Preprocessed ratings for {len(self.ratings)} ratings")
+
+    # this takes forever to run
     with c.time_block("Compute pair counts dict"):
       self.pairCountsDict = _get_pair_counts_dict(self.ratings, windowMillis=windowMillis)
     logger.info(f"Computed pair counts dict for {len(self.pairCountsDict)} pairs")
+
     self.uniqueRatingsOnTweets = self.ratings[
       [c.tweetIdKey, c.raterParticipantIdKey]
     ].drop_duplicates()
@@ -60,26 +69,41 @@ class PostSelectionSimilarity:
     )
     self.suspectPairs = set(self.suspectPairs + list(self.pairCountsDict.keys()))
     logger.info(f"Computed suspect pairs for {len(self.suspectPairs)} pairs")
-  # Define helper to get affinity and coverage for a pair over a time window
-  def _compute_affinity_and_coverage(self, ratings, notes, latencyMins, minDenom):
-    # Identify ratings subset
+    
+  def _merge_ratings_and_notes(self, ratings, notes):
+    """Merge ratings with notes and compute latency. Done once, shared across all latency windows."""
+    logger.info(f"Merging ratings and notes for {len(ratings)} ratings")
     ratings = ratings[[c.raterParticipantIdKey, c.noteIdKey, c.createdAtMillisKey]].rename(
       columns={c.createdAtMillisKey: "ratingMillis"}
     )
     notes = notes[[c.noteAuthorParticipantIdKey, c.noteIdKey, c.createdAtMillisKey]].rename(
       columns={c.createdAtMillisKey: "noteMillis"}
     )
-    ratings = ratings.merge(notes)
-    ratings["latency"] = ratings["ratingMillis"] - ratings["noteMillis"]
-    ratings = ratings[ratings["latency"] <= (1000 * 60 * latencyMins)]
-    # Compute note and rating totals
+    merged = ratings.merge(notes)
+    merged["latency"] = merged["ratingMillis"] - merged["noteMillis"]
+    logger.info(f"Merged ratings and notes: {len(merged)} rows")
+    return merged
+
+  def _compute_writer_totals(self, notes):
+    """Compute total notes per author. Done once, shared across all latency windows."""
     writerTotals = (
-      notes[c.noteAuthorParticipantIdKey]
+      notes[[c.noteAuthorParticipantIdKey, c.noteIdKey, c.createdAtMillisKey]]
+      .rename(columns={c.createdAtMillisKey: "noteMillis"})[c.noteAuthorParticipantIdKey]
       .value_counts()
       .to_frame()
       .reset_index(drop=False)
       .rename(columns={"count": "writerTotal"})
     )
+    logger.info(f"Computed writer totals for {len(writerTotals)} writers")
+    return writerTotals
+
+  def _compute_affinity_and_coverage_for_latency(self, merged, writerTotals, latencyMins, minDenom):
+    """Compute affinity and coverage for a single latency window from pre-merged data."""
+    logger.info(f"Computing affinity and coverage for {latencyMins}m window")
+    ratings = merged[merged["latency"] <= (1000 * 60 * latencyMins)]
+    logger.info(f"Filtered to {len(ratings)} ratings within {latencyMins}m")
+
+    # Compute rater and pair totals
     raterTotals = (
       ratings[c.raterParticipantIdKey]
       .value_counts()
@@ -87,14 +111,19 @@ class PostSelectionSimilarity:
       .reset_index(drop=False)
       .rename(columns={"count": f"raterTotal{latencyMins}m"})
     )
+    logger.info(f"Computed rater totals for {len(raterTotals)} raters")
     ratingTotals = (
       ratings[[c.noteAuthorParticipantIdKey, c.raterParticipantIdKey]]
       .value_counts()
       .reset_index(drop=False)
       .rename(columns={"count": f"pairTotal{latencyMins}m"})
     )
+    logger.info(f"Computed pair totals for {len(ratingTotals)} pairs")
     ratingTotals = ratingTotals.merge(writerTotals, how="left")
+    logger.info(f"Merged writer totals")
     ratingTotals = ratingTotals.merge(raterTotals, how="left")
+    logger.info(f"Merged rater totals")
+
     # Compute ratios
     ratingTotals[f"raterAffinity{latencyMins}m"] = (
       ratingTotals[f"pairTotal{latencyMins}m"] / ratingTotals[f"raterTotal{latencyMins}m"]
@@ -108,6 +137,7 @@ class PostSelectionSimilarity:
     ratingTotals.loc[
       ratingTotals["writerTotal"] < minDenom, f"writerCoverage{latencyMins}m"
     ] = pd.NA
+    logger.info(f"Computed affinity and coverage for {len(ratingTotals)} pairs at {latencyMins}m")
     return ratingTotals[
       [
         c.noteAuthorParticipantIdKey,
@@ -127,11 +157,16 @@ class PostSelectionSimilarity:
 
   def compute_affinity_and_coverage(self, ratings, notes, latencyMins, minDenom=10):
     latencyMins = sorted(latencyMins, reverse=True)
-    df = self._compute_affinity_and_coverage(ratings, notes, latencyMins[0], minDenom)
+
+    # Compute shared data once, reuse for all latency windows
+    merged = self._merge_ratings_and_notes(ratings, notes)
+    writerTotals = self._compute_writer_totals(notes)
+
+    df = self._compute_affinity_and_coverage_for_latency(merged, writerTotals, latencyMins[0], minDenom)
     origLen = len(df)
     for latency in latencyMins[1:]:
       df = df.merge(
-        self._compute_affinity_and_coverage(ratings, notes, latency, minDenom),
+        self._compute_affinity_and_coverage_for_latency(merged, writerTotals, latency, minDenom),
         on=[c.noteAuthorParticipantIdKey, c.raterParticipantIdKey, "writerTotal"],
         how="left",
       )
