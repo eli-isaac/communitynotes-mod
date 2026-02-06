@@ -506,8 +506,8 @@ def preprocess_data(
       "Num Ratings: %d, Num Unique Notes Rated: %d, Num Unique Raters: %d"
       % (
         len(ratings),
-        len(np.unique(ratings[c.noteIdKey])),
-        len(np.unique(ratings[c.raterParticipantIdKey])),
+        ratings[c.noteIdKey].nunique(),
+        ratings[c.raterParticipantIdKey].nunique(),
       )
     )
   return notes, ratings, noteStatusHistory
