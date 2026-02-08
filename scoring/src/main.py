@@ -18,7 +18,8 @@ Example Usage:
     --notes data/notes-00000.tsv \
     --ratings data/ratings \
     --status data/noteStatusHistory-00000.tsv \
-    --outdir data
+    --outdir data \
+    --sample-ratings 0.1
 """
 
 import logging

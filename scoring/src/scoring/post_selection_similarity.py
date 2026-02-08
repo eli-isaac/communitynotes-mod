@@ -3,7 +3,7 @@ import logging
 import sys
 from typing import Dict
 
-from . import constants as c
+from . import constants as c, dev_cache
 
 import numpy as np
 import pandas as pd
@@ -25,25 +25,42 @@ class PostSelectionSimilarity:
     minSimPseudocounts: int = 10,
     windowMillis: int = 1000 * 60 * 20,
   ):
-    # Compute rater affinity and writer coverage.  Apply thresholds to identify linked pairs.
-    logger.info("Computing rater affinity and writer coverage")
-    # this takes 14 seconds to run
-    helpful_mask = ratings[c.helpfulnessLevelKey] == c.helpfulValueTsv
-    helpfulRatings = ratings.loc[helpful_mask, [c.raterParticipantIdKey, c.noteIdKey, c.createdAtMillisKey]]
-    logger.info(f"Computing rater affinity and writer coverage for {len(helpfulRatings)} helpful ratings")
-    # this takes 3.5 minutes to run
-    self.affinityAndCoverage = self.compute_affinity_and_coverage(helpfulRatings, notes, [1, 5, 20])
-    logger.info(f"Computed rater affinity and writer coverage for {len(self.affinityAndCoverage)} pairs")
+    # Try loading cached state computed before _get_pair_counts_dict.
+    # When the cache hits, everything above _get_pair_counts_dict is skipped.
+    cached = dev_cache.load("pss_pre_pair_counts")
+    if cached is not None:
+      self.affinityAndCoverage = cached["affinityAndCoverage"]
+      self.suspectPairs = cached["suspectPairs"]
+      self.ratings = cached["ratings"]
+      logger.info("Restored PSS intermediate state from cache — skipping to _get_pair_counts_dict")
+    else:
+      # Compute rater affinity and writer coverage.  Apply thresholds to identify linked pairs.
+      logger.info("Computing rater affinity and writer coverage")
+      # this takes 14 seconds to run
+      helpful_mask = ratings[c.helpfulnessLevelKey] == c.helpfulValueTsv
+      helpfulRatings = ratings.loc[helpful_mask, [c.raterParticipantIdKey, c.noteIdKey, c.createdAtMillisKey]]
+      logger.info(f"Computing rater affinity and writer coverage for {len(helpfulRatings)} helpful ratings")
+      # this takes 3.5 minutes to run
+      self.affinityAndCoverage = self.compute_affinity_and_coverage(helpfulRatings, notes, [1, 5, 20])
+      logger.info(f"Computed rater affinity and writer coverage for {len(self.affinityAndCoverage)} pairs")
 
-    # runs quickly
-    self.suspectPairs = self.get_suspect_pairs(self.affinityAndCoverage)
-    logger.info(f"Found {len(self.suspectPairs)} suspect pairs")
+      # runs quickly
+      self.suspectPairs = self.get_suspect_pairs(self.affinityAndCoverage)
+      logger.info(f"Found {len(self.suspectPairs)} suspect pairs")
 
-    # Compute MinSim and NPMI
-    # this takes 2.5 minutes to run
-    self.ratings = _preprocess_ratings(notes, ratings)
-    logger.info(f"Preprocessed ratings for {len(self.ratings)} ratings")
+      # Compute MinSim and NPMI
+      # this takes 2.5 minutes to run
+      self.ratings = _preprocess_ratings(notes, ratings)
+      logger.info(f"Preprocessed ratings for {len(self.ratings)} ratings")
 
+      # Save cache so next run can skip straight to _get_pair_counts_dict.
+      dev_cache.save("pss_pre_pair_counts", {
+        "affinityAndCoverage": self.affinityAndCoverage,
+        "suspectPairs": self.suspectPairs,
+        "ratings": self.ratings,
+      })
+
+    # ---- RESUME POINT: _get_pair_counts_dict (the function being iterated on) ----
     # this takes forever to run
     with c.time_block("Compute pair counts dict"):
       self.pairCountsDict = _get_pair_counts_dict(self.ratings, windowMillis=windowMillis)
@@ -98,7 +115,31 @@ class PostSelectionSimilarity:
     return writerTotals
 
   def _compute_affinity_and_coverage_for_latency(self, merged, writerTotals, latencyMins, minDenom):
-    """Compute affinity and coverage for a single latency window from pre-merged data."""
+    """Compute rater affinity and writer coverage metrics for a single latency window.
+
+    Filters the pre-merged ratings/notes data to only ratings within the given latency
+    window, then computes per-pair statistics measuring how concentrated a rater's activity
+    is on a particular note author (affinity) and what fraction of an author's notes a
+    rater has rated (coverage). Pairs with insufficient data (below minDenom) are set to NA.
+
+    Args:
+      merged: DataFrame with columns [raterParticipantId, noteId, ratingMillis,
+          noteAuthorParticipantId, noteMillis, latency]. Pre-joined ratings and notes
+          produced by _merge_ratings_and_notes.
+      writerTotals: DataFrame with columns [noteAuthorParticipantId, writerTotal],
+          containing the total number of notes written by each author across all time
+          (not filtered by latency).
+      latencyMins: The latency window in minutes. Only ratings where
+          (ratingMillis - noteMillis) <= latencyMins * 60 * 1000 are included.
+      minDenom: Minimum number of ratings (for rater totals) or notes (for writer totals)
+          required to compute a meaningful ratio. Pairs below this threshold have their
+          affinity or coverage set to NA.
+
+    Returns:
+      DataFrame with columns [noteAuthorParticipantId, raterParticipantId, writerTotal,
+      raterTotal{latencyMins}m, pairTotal{latencyMins}m, raterAffinity{latencyMins}m,
+      writerCoverage{latencyMins}m].
+    """
     logger.info(f"Computing affinity and coverage for {latencyMins}m window")
     ratings = merged[merged["latency"] <= (1000 * 60 * latencyMins)]
     logger.info(f"Filtered to {len(ratings)} ratings within {latencyMins}m")
@@ -112,6 +153,7 @@ class PostSelectionSimilarity:
       .rename(columns={"count": f"raterTotal{latencyMins}m"})
     )
     logger.info(f"Computed rater totals for {len(raterTotals)} raters")
+    # rating totals takes about 7 seconds to run
     ratingTotals = (
       ratings[[c.noteAuthorParticipantIdKey, c.raterParticipantIdKey]]
       .value_counts()
@@ -120,9 +162,12 @@ class PostSelectionSimilarity:
     )
     logger.info(f"Computed pair totals for {len(ratingTotals)} pairs")
     ratingTotals = ratingTotals.merge(writerTotals, how="left")
-    logger.info(f"Merged writer totals")
+    logger.info("Merged writer totals")
     ratingTotals = ratingTotals.merge(raterTotals, how="left")
-    logger.info(f"Merged rater totals")
+    logger.info("Merged rater totals")
+
+    # our df now has these columns:
+    # noteAuthorParticipantId, raterParticipantId, writerTotal, raterTotal{latencyMins}m, pairTotal{latencyMins}m
 
     # Compute ratios
     ratingTotals[f"raterAffinity{latencyMins}m"] = (
@@ -158,11 +203,15 @@ class PostSelectionSimilarity:
   def compute_affinity_and_coverage(self, ratings, notes, latencyMins, minDenom=10):
     latencyMins = sorted(latencyMins, reverse=True)
 
-    # Compute shared data once, reuse for all latency windows
+    # Compute shared data once, reuse for all latency windows 
     merged = self._merge_ratings_and_notes(ratings, notes)
+    logger.info("Computed merged data")
     writerTotals = self._compute_writer_totals(notes)
+    logger.info("Computed writer totals")
 
     df = self._compute_affinity_and_coverage_for_latency(merged, writerTotals, latencyMins[0], minDenom)
+    logger.info("Computed affinity and coverage for 1m window")
+
     origLen = len(df)
     for latency in latencyMins[1:]:
       df = df.merge(
@@ -170,6 +219,7 @@ class PostSelectionSimilarity:
         on=[c.noteAuthorParticipantIdKey, c.raterParticipantIdKey, "writerTotal"],
         how="left",
       )
+      logger.info(f"Computed and merged affinity and coverage for {latency}m window")
       assert len(df) == origLen
     cols = [c.noteAuthorParticipantIdKey, c.raterParticipantIdKey, "writerTotal"]
     for latency in sorted(latencyMins):

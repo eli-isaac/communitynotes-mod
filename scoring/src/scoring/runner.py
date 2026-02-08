@@ -3,7 +3,7 @@ import logging
 import os
 import sys
 
-from . import constants as c
+from . import constants as c, dev_cache
 from .enums import scorers_from_csv
 from .pandas_utils import patch_pandas
 from .process_data import LocalDataLoader, tsv_reader, write_parquet_local, write_tsv_local
@@ -174,6 +174,12 @@ def parse_args() -> argparse.Namespace:
     dest="sample_ratings",
     help="Set to sample ratings at random.",
   )
+  parser.add_argument(
+    "--cache-dir",
+    default=None,
+    dest="cache_dir",
+    help="Enable dev caching to skip expensive stages on repeat runs. Provide a directory path.",
+  )
   return parser.parse_args()
 
 
@@ -189,43 +195,63 @@ def _run_scorer(
     c.epochMillis = args.epoch_millis
     c.useCurrentTimeInsteadOfEpochMillisForNoteStatusHistory = False
 
-  # Load input dataframes.
-  if dataLoader is None:
-    dataLoader = LocalDataLoader(
-      args.notes,
-      args.ratings,
-      args.status,
-      args.enrollment,
-      args.headers,
-    )
-  notes, ratings, statusHistory, userEnrollment = dataLoader.get_data()
-  if args.previous_scored_notes is not None:
-    previousScoredNotes = tsv_reader(
-      args.previous_scored_notes,
-      c.noteModelOutputTSVTypeMapping,
-      c.noteModelOutputTSVColumns,
-      header=False,
-      convertNAToNone=False,
-    )
-    assert (
-      args.previous_aux_note_info is not None
-    ), "previous_aux_note_info must be available if previous_scored_notes is available"
-    previousAuxiliaryNoteInfo = tsv_reader(
-      args.previous_aux_note_info,
-      c.auxiliaryScoredNotesTSVTypeMapping,
-      c.auxiliaryScoredNotesTSVColumns,
-      header=False,
-      convertNAToNone=False,
-    )
+  # Try loading all input data from dev cache (skips TSV parsing + sampling).
+  cached = dev_cache.load("runner_data")
+  if cached is not None:
+    notes = cached["notes"]
+    ratings = cached["ratings"]
+    statusHistory = cached["statusHistory"]
+    userEnrollment = cached["userEnrollment"]
+    previousScoredNotes = cached["previousScoredNotes"]
+    previousAuxiliaryNoteInfo = cached["previousAuxiliaryNoteInfo"]
   else:
-    previousScoredNotes = None
-    previousAuxiliaryNoteInfo = None
+    # Load input dataframes.
+    if dataLoader is None:
+      dataLoader = LocalDataLoader(
+        args.notes,
+        args.ratings,
+        args.status,
+        args.enrollment,
+        args.headers,
+      )
+    notes, ratings, statusHistory, userEnrollment = dataLoader.get_data()
+    if args.previous_scored_notes is not None:
+      previousScoredNotes = tsv_reader(
+        args.previous_scored_notes,
+        c.noteModelOutputTSVTypeMapping,
+        c.noteModelOutputTSVColumns,
+        header=False,
+        convertNAToNone=False,
+      )
+      assert (
+        args.previous_aux_note_info is not None
+      ), "previous_aux_note_info must be available if previous_scored_notes is available"
+      previousAuxiliaryNoteInfo = tsv_reader(
+        args.previous_aux_note_info,
+        c.auxiliaryScoredNotesTSVTypeMapping,
+        c.auxiliaryScoredNotesTSVColumns,
+        header=False,
+        convertNAToNone=False,
+      )
+    else:
+      previousScoredNotes = None
+      previousAuxiliaryNoteInfo = None
 
-  # Sample ratings to decrease runtime
-  if args.sample_ratings:
-    origSize = len(ratings)
-    ratings = ratings.sample(frac=args.sample_ratings)
-    logger.info(f"ratings reduced from {origSize} to {len(ratings)}")
+    # Sample ratings to decrease runtime
+    if args.sample_ratings:
+      origSize = len(ratings)
+      ratings = ratings.sample(frac=args.sample_ratings)
+      logger.info(f"ratings reduced from {origSize} to {len(ratings)}")
+
+    # Save to dev cache for next run.
+    dev_cache.save("runner_data", {
+      "notes": notes,
+      "ratings": ratings,
+      "statusHistory": statusHistory,
+      "userEnrollment": userEnrollment,
+      "previousScoredNotes": previousScoredNotes,
+      "previousAuxiliaryNoteInfo": previousAuxiliaryNoteInfo,
+    })
 
   # Invoke scoring and user contribution algorithms.
   scoredNotes, helpfulnessScores, newStatus, auxNoteInfo = run_scoring(
@@ -273,6 +299,9 @@ def main(
     args = parse_args()
   logger.info(f"scorer python version: {sys.version}")
   logger.info(f"scorer pandas version: {pd.__version__}")
+  # Configure dev cache if --cache-dir was provided.
+  if getattr(args, "cache_dir", None):
+    dev_cache.configure(args.cache_dir)
   # patch_pandas requires that args are available (which matches the production binary) so
   # we first parse the arguments then invoke the decorated _run_scorer.
   return _run_scorer(args=args, dataLoader=dataLoader, extraScoringArgs=extraScoringArgs)

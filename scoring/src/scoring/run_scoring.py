@@ -2115,6 +2115,8 @@ def run_scoring(
       )
   logger.info("Starting final scoring")
 
+  # 
+
   scoredNotes, newNoteStatusHistory, auxiliaryNoteInfo, _ = run_final_note_scoring(
     args,
     notes=notes,
