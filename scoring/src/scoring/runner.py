@@ -240,7 +240,7 @@ def _run_scorer(
     # Sample ratings to decrease runtime
     if args.sample_ratings:
       origSize = len(ratings)
-      ratings = ratings.sample(frac=args.sample_ratings)
+      ratings = ratings.sample(frac=args.sample_ratings, random_state=42)
       logger.info(f"ratings reduced from {origSize} to {len(ratings)}")
 
     # Save to dev cache for next run.

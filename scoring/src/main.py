@@ -19,7 +19,8 @@ Example Usage:
     --ratings data/ratings \
     --status data/noteStatusHistory-00000.tsv \
     --outdir data \
-    --sample-ratings 0.1
+    --sample-ratings 0.1 \
+    --cache-dir .cache
 """
 
 import logging
@@ -33,4 +34,6 @@ if __name__ == "__main__":
     format="%(asctime)s %(levelname)s:%(name)s:%(message)s",
     datefmt="%H:%M:%S"
   )
+  # Silence Numba's extremely verbose internal compiler logs
+  logging.getLogger("numba").setLevel(logging.WARNING)
   main()
