@@ -87,12 +87,6 @@ class PostSelectionSimilarity:
       })
 
     # ---- RESUME POINT: _get_pair_counts_dict (the function being iterated on) ----
-    # this takes forever to run
-    with c.time_block("Compute pair counts dict"):
-      # taking about 10 minutes to run on 10% sample data
-      self.pairCountsDict = _get_pair_counts_dict(self.ratings, windowMillis=windowMillis)
-    logger.info(f"Computed pair counts dict for {len(self.pairCountsDict)} pairs")
-
     self.uniqueRatingsOnTweets = self.ratings[
       [c.tweetIdKey, c.raterParticipantIdKey]
     ].drop_duplicates()
@@ -101,6 +95,29 @@ class PostSelectionSimilarity:
     raterTotalsDict = {
       index: value for index, value in raterTotals.items() if value >= minUniquePosts
     }
+    N = len(self.uniqueRatingsOnTweets)
+
+    # Minimum co-rating count that could survive the downstream PMI/minSim
+    # filter (which uses OR).  Compute the minimum for each condition with
+    # the most favorable rater totals (= minUniquePosts) and take the lower.
+    minSimMinCount = int(minimumRatingProportionThreshold * (minUniquePosts + minSimPseudocounts))
+    npmiMinCount = minSimMinCount  # fallback if NPMI can never pass
+    denom = (minUniquePosts + pmiRegularization) ** 2
+    for count in range(1, minSimMinCount):
+      pmi = np.log(count * N / denom)
+      npmi = pmi / -np.log(count / N)
+      if npmi >= smoothedNpmiThreshold:
+        npmiMinCount = count
+        break
+    minCoRatingCount = min(minSimMinCount, npmiMinCount)
+    logger.info(f"Pre-filter threshold: minCoRatingCount={minCoRatingCount} "
+                f"(minSim={minSimMinCount}, npmi={npmiMinCount})")
+
+    with c.time_block("Compute pair counts dict"):
+      self.pairCountsDict = _get_pair_counts_dict(
+        self.ratings, windowMillis=windowMillis, minCoRatingCount=minCoRatingCount,
+      )
+    logger.info(f"Computed pair counts dict for {len(self.pairCountsDict)} pairs")
 
     self.pairCountsDict = _join_rater_totals_compute_pmi_and_filter_edges_below_threshold(
       pairCountsDict=self.pairCountsDict,
@@ -550,11 +567,14 @@ def _log_mem(label):
   logger.info(f"[mem] {label}: RSS {_mem_gb():.1f}GB{avail_str}")
 
 
-def _get_pair_counts_dict(ratings, windowMillis):
+def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   """Compute pair co-rating counts preserving the per-note time window.
 
   Uses Numba for windowed pair finding (outputting to arrays instead of hash
   tables), then numpy sort-based dedup and run-length counting.
+
+  Pairs with count < minCoRatingCount are filtered out (they can't survive
+  the downstream PMI/minSim filter anyway).
   """
   logger.info("Starting pair counts computation (Numba + array)")
   _log_mem("start")
@@ -575,8 +595,8 @@ def _get_pair_counts_dict(ratings, windowMillis):
   times = ratings[c.createdAtMillisKey].values.astype(np.int64)
   _log_mem("after extracting arrays")
 
-  # Sort by (tweet, note, time) for contiguous grouped access
-  sort_idx = np.lexsort((times, note_arr, tweet_arr))
+  # Sort by (note, time) for contiguous grouped access
+  sort_idx = np.lexsort((times, note_arr))
   tweet_arr = tweet_arr[sort_idx]
   note_arr = note_arr[sort_idx]
   times = times[sort_idx]
@@ -588,7 +608,7 @@ def _get_pair_counts_dict(ratings, windowMillis):
   n = len(tweet_arr)
   group_mask = np.empty(n, dtype=np.bool_)
   group_mask[0] = True
-  group_mask[1:] = (tweet_arr[1:] != tweet_arr[:-1]) | (note_arr[1:] != note_arr[:-1])
+  group_mask[1:] = note_arr[1:] != note_arr[:-1]
   group_starts = np.where(group_mask)[0].astype(np.int64)
   n_groups = len(group_starts)
 
@@ -625,6 +645,7 @@ def _get_pair_counts_dict(ratings, windowMillis):
   gc.collect()
   _log_mem("after fill pass")
 
+  # this sorting takes most of the time (about 13 minutes)
   # --- Sort by (left, right, tweet) for combined dedup + counting ---
   logger.info("Sorting pair events...")
   sort_idx = np.lexsort((out_tweets, out_right, out_left))
@@ -663,13 +684,11 @@ def _get_pair_counts_dict(ratings, windowMillis):
   gc.collect()
   logger.info(f"Total unique pairs: {len(result_left):,}")
 
-  # Pre-filter: downstream needs count >= 8 at minimum
-  MIN_COUNT = 5
-  count_mask = pair_counts_arr >= MIN_COUNT
+  count_mask = pair_counts_arr >= minCoRatingCount
   result_left = result_left[count_mask]
   result_right = result_right[count_mask]
   result_counts = pair_counts_arr[count_mask]
-  logger.info(f"Pairs with count >= {MIN_COUNT}: {len(result_left):,}")
+  logger.info(f"Pairs with count >= {minCoRatingCount}: {len(result_left):,}")
   _log_mem("after filtering")
 
   # Convert to dict with original rater IDs
