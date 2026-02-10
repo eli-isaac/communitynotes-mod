@@ -86,7 +86,13 @@ class PostSelectionSimilarity:
         "ratings": self.ratings,
       })
 
-    # ---- RESUME POINT: _get_pair_counts_dict (the function being iterated on) ----
+    # ---- RESUME POINT: _get_pair_counts (the function being iterated on) ----
+    with c.time_block("Compute pair counts"):
+      pairLeftCodes, pairRightCodes, pairCounts, raterUniques = _get_pair_counts(
+        self.ratings, windowMillis=windowMillis,
+      )
+    logger.info(f"Computed pair counts for {len(pairCounts):,} unique pairs")
+
     self.uniqueRatingsOnTweets = self.ratings[
       [c.tweetIdKey, c.raterParticipantIdKey]
     ].drop_duplicates()
@@ -96,17 +102,11 @@ class PostSelectionSimilarity:
       index: value for index, value in raterTotals.items() if value >= minUniquePosts
     }
 
-    with c.time_block("Compute pair counts"):
-      pair_left, pair_right, pair_counts_arr, rater_uniques = _get_pair_counts(
-        self.ratings, windowMillis=windowMillis,
-      )
-    logger.info(f"Computed pair counts for {len(pair_left):,} pairs")
-
     self.pairCountsDict = _join_rater_totals_compute_pmi_and_filter_edges_below_threshold(
-      pair_left=pair_left,
-      pair_right=pair_right,
-      pair_counts_arr=pair_counts_arr,
-      rater_uniques=rater_uniques,
+      pairLeftCodes=pairLeftCodes,
+      pairRightCodes=pairRightCodes,
+      pairCounts=pairCounts,
+      raterUniques=raterUniques,
       raterTotalsDict=raterTotalsDict,
       N=len(self.uniqueRatingsOnTweets),
       pmiPseudocounts=pmiRegularization,
@@ -401,10 +401,10 @@ def _preprocess_ratings(notes: pd.DataFrame, ratings: pd.DataFrame) -> pd.DataFr
 
 
 def _join_rater_totals_compute_pmi_and_filter_edges_below_threshold(
-  pair_left: np.ndarray,
-  pair_right: np.ndarray,
-  pair_counts_arr: np.ndarray,
-  rater_uniques,
+  pairLeftCodes,
+  pairRightCodes,
+  pairCounts,
+  raterUniques,
   raterTotalsDict: Dict,
   N: int,
   pmiPseudocounts: int,
@@ -412,37 +412,49 @@ def _join_rater_totals_compute_pmi_and_filter_edges_below_threshold(
   smoothedNpmiThreshold: float,
   minimumRatingProportionThreshold: float,
 ):
+  # Build a rater-totals lookup array indexed by integer code (so all math
+  # below can stay in numpy with zero Python loops over pairs).
+  n_raters = len(raterUniques)
+  rater_totals = np.zeros(n_raters, dtype=np.int64)
+  rater_valid = np.zeros(n_raters, dtype=np.bool_)
+  for code in range(n_raters):
+    rater_id = raterUniques[code]
+    if rater_id in raterTotalsDict:
+      rater_totals[code] = raterTotalsDict[rater_id]
+      rater_valid[code] = True
+
+  # Filter: both raters valid and count >= 2 (count=1 pairs can't survive)
+  mask = rater_valid[pairLeftCodes] & rater_valid[pairRightCodes] & (pairCounts >= 2)
+  left_codes = pairLeftCodes[mask]
+  right_codes = pairRightCodes[mask]
+  counts = pairCounts[mask].astype(np.float64)
+  logger.info(f"Pairs after pre-filter: {len(counts):,}")
+
+  # Vectorized PMI
+  left_totals = rater_totals[left_codes].astype(np.float64)
+  right_totals = rater_totals[right_codes].astype(np.float64)
+  pmi_denom = (left_totals + pmiPseudocounts) * (right_totals + pmiPseudocounts)
+  smoothed_pmi = np.log(counts * N / pmi_denom)
+  smoothed_npmi = smoothed_pmi / -np.log(counts / N)
+
+  # Vectorized minSim
+  min_totals = np.minimum(left_totals, right_totals)
+  min_sim = counts / (min_totals + minSimPseudocounts)
+
+  # Final filter
+  keep = (smoothed_npmi >= smoothedNpmiThreshold) | (min_sim >= minimumRatingProportionThreshold)
+  left_codes = left_codes[keep]
+  right_codes = right_codes[keep]
+  smoothed_npmi = smoothed_npmi[keep]
+  min_sim = min_sim[keep]
+  logger.info(f"Pairs surviving PMI/minSim filter: {len(left_codes):,}")
+
+  # Build dict only for the survivors (typically ~100K pairs)
   pairCountsDict = {}
+  for i in range(len(left_codes)):
+    pair = tuple(sorted((raterUniques[left_codes[i]], raterUniques[right_codes[i]])))
+    pairCountsDict[pair] = (float(smoothed_npmi[i]), float(min_sim[i]))
 
-  with c.time_block("Compute PMI and minSim"):
-    for i in range(len(pair_left)):
-      leftRaterId = rater_uniques[pair_left[i]]
-      rightRaterId = rater_uniques[pair_right[i]]
-      coRatings = int(pair_counts_arr[i])
-
-      if leftRaterId not in raterTotalsDict or rightRaterId not in raterTotalsDict:
-        continue
-
-      leftTotal = raterTotalsDict[leftRaterId]
-      rightTotal = raterTotalsDict[rightRaterId]
-
-      # PMI
-      pmiNumerator = coRatings * N
-      pmiDenominator = (leftTotal + pmiPseudocounts) * (rightTotal + pmiPseudocounts)
-      smoothedPmi = np.log(pmiNumerator / pmiDenominator)
-      smoothedNpmi = smoothedPmi / -np.log(coRatings / N)
-
-      # minSim
-      minTotal = min(leftTotal, rightTotal)
-      minSimRatingProp = coRatings / (minTotal + minSimPseudocounts)
-
-      if (smoothedNpmi >= smoothedNpmiThreshold) or (
-        minSimRatingProp >= minimumRatingProportionThreshold
-      ):
-        pair = tuple(sorted((leftRaterId, rightRaterId)))
-        pairCountsDict[pair] = (smoothedNpmi, minSimRatingProp)
-
-  logger.info(f"Pairs passing PMI/minSim filter: {len(pairCountsDict):,}")
   return pairCountsDict
 
 
@@ -550,9 +562,9 @@ def _get_pair_counts(ratings, windowMillis):
   Uses Numba for windowed pair finding (outputting to arrays instead of hash
   tables), then numpy sort-based dedup and run-length counting.
 
-  Returns (pair_left, pair_right, pair_counts, rater_uniques) where pair_left
-  and pair_right are int32 rater code arrays, pair_counts is the co-rating
-  count for each pair, and rater_uniques maps codes back to original IDs.
+  Returns (left_codes, right_codes, counts, rater_uniques) — raw numpy arrays
+  of integer rater codes plus the mapping to recover original IDs.  The caller
+  is responsible for filtering and building a dict from the survivors.
   """
   logger.info("Starting pair counts computation (Numba + array)")
   _log_mem("start")
@@ -604,8 +616,7 @@ def _get_pair_counts(ratings, windowMillis):
   _log_mem("after count pass")
 
   if total_events == 0:
-    empty = np.array([], dtype=np.int32)
-    return empty, empty, empty, rater_uniques
+    return {}
 
   # --- Pass 2: fill arrays ---
   logger.info("Generating pair events...")
