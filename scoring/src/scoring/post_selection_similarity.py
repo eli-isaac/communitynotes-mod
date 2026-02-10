@@ -95,32 +95,18 @@ class PostSelectionSimilarity:
     raterTotalsDict = {
       index: value for index, value in raterTotals.items() if value >= minUniquePosts
     }
-    N = len(self.uniqueRatingsOnTweets)
 
-    # Minimum co-rating count that could survive the downstream PMI/minSim
-    # filter (which uses OR).  Compute the minimum for each condition with
-    # the most favorable rater totals (= minUniquePosts) and take the lower.
-    minSimMinCount = int(minimumRatingProportionThreshold * (minUniquePosts + minSimPseudocounts))
-    npmiMinCount = minSimMinCount  # fallback if NPMI can never pass
-    denom = (minUniquePosts + pmiRegularization) ** 2
-    for count in range(1, minSimMinCount):
-      pmi = np.log(count * N / denom)
-      npmi = pmi / -np.log(count / N)
-      if npmi >= smoothedNpmiThreshold:
-        npmiMinCount = count
-        break
-    minCoRatingCount = min(minSimMinCount, npmiMinCount)
-    logger.info(f"Pre-filter threshold: minCoRatingCount={minCoRatingCount} "
-                f"(minSim={minSimMinCount}, npmi={npmiMinCount})")
-
-    with c.time_block("Compute pair counts dict"):
-      self.pairCountsDict = _get_pair_counts_dict(
-        self.ratings, windowMillis=windowMillis, minCoRatingCount=minCoRatingCount,
+    with c.time_block("Compute pair counts"):
+      pair_left, pair_right, pair_counts_arr, rater_uniques = _get_pair_counts(
+        self.ratings, windowMillis=windowMillis,
       )
-    logger.info(f"Computed pair counts dict for {len(self.pairCountsDict)} pairs")
+    logger.info(f"Computed pair counts for {len(pair_left):,} pairs")
 
     self.pairCountsDict = _join_rater_totals_compute_pmi_and_filter_edges_below_threshold(
-      pairCountsDict=self.pairCountsDict,
+      pair_left=pair_left,
+      pair_right=pair_right,
+      pair_counts_arr=pair_counts_arr,
+      rater_uniques=rater_uniques,
       raterTotalsDict=raterTotalsDict,
       N=len(self.uniqueRatingsOnTweets),
       pmiPseudocounts=pmiRegularization,
@@ -415,7 +401,10 @@ def _preprocess_ratings(notes: pd.DataFrame, ratings: pd.DataFrame) -> pd.DataFr
 
 
 def _join_rater_totals_compute_pmi_and_filter_edges_below_threshold(
-  pairCountsDict: Dict,
+  pair_left: np.ndarray,
+  pair_right: np.ndarray,
+  pair_counts_arr: np.ndarray,
+  rater_uniques,
   raterTotalsDict: Dict,
   N: int,
   pmiPseudocounts: int,
@@ -423,21 +412,19 @@ def _join_rater_totals_compute_pmi_and_filter_edges_below_threshold(
   smoothedNpmiThreshold: float,
   minimumRatingProportionThreshold: float,
 ):
-  keys_to_delete = []
+  pairCountsDict = {}
 
   with c.time_block("Compute PMI and minSim"):
-    for leftRaterId, rightRaterId in pairCountsDict:
+    for i in range(len(pair_left)):
+      leftRaterId = rater_uniques[pair_left[i]]
+      rightRaterId = rater_uniques[pair_right[i]]
+      coRatings = int(pair_counts_arr[i])
+
       if leftRaterId not in raterTotalsDict or rightRaterId not in raterTotalsDict:
-        keys_to_delete.append((leftRaterId, rightRaterId))
         continue
 
       leftTotal = raterTotalsDict[leftRaterId]
       rightTotal = raterTotalsDict[rightRaterId]
-      coRatings = pairCountsDict[(leftRaterId, rightRaterId)]
-
-      if type(coRatings) != int:
-        # already processed (should only occur when re-running...)
-        continue
 
       # PMI
       pmiNumerator = coRatings * N
@@ -452,20 +439,10 @@ def _join_rater_totals_compute_pmi_and_filter_edges_below_threshold(
       if (smoothedNpmi >= smoothedNpmiThreshold) or (
         minSimRatingProp >= minimumRatingProportionThreshold
       ):
-        pairCountsDict[(leftRaterId, rightRaterId)] = (smoothedNpmi, minSimRatingProp)
-      else:
-        keys_to_delete.append((leftRaterId, rightRaterId))
+        pair = tuple(sorted((leftRaterId, rightRaterId)))
+        pairCountsDict[pair] = (smoothedNpmi, minSimRatingProp)
 
-    print(f"Pairs dict used {sys.getsizeof(pairCountsDict) * 1e-9}GB RAM at max")
-
-  with c.time_block("Delete unneeded pairs from pairCountsDict"):
-    for key in keys_to_delete:
-      del pairCountsDict[key]
-
-  print(
-    f"Pairs dict used {sys.getsizeof(pairCountsDict) * 1e-9}GB RAM after deleted unneeded pairs"
-  )
-
+  logger.info(f"Pairs passing PMI/minSim filter: {len(pairCountsDict):,}")
   return pairCountsDict
 
 
@@ -567,14 +544,15 @@ def _log_mem(label):
   logger.info(f"[mem] {label}: RSS {_mem_gb():.1f}GB{avail_str}")
 
 
-def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
+def _get_pair_counts(ratings, windowMillis):
   """Compute pair co-rating counts preserving the per-note time window.
 
   Uses Numba for windowed pair finding (outputting to arrays instead of hash
   tables), then numpy sort-based dedup and run-length counting.
 
-  Pairs with count < minCoRatingCount are filtered out (they can't survive
-  the downstream PMI/minSim filter anyway).
+  Returns (pair_left, pair_right, pair_counts, rater_uniques) where pair_left
+  and pair_right are int32 rater code arrays, pair_counts is the co-rating
+  count for each pair, and rater_uniques maps codes back to original IDs.
   """
   logger.info("Starting pair counts computation (Numba + array)")
   _log_mem("start")
@@ -626,7 +604,8 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   _log_mem("after count pass")
 
   if total_events == 0:
-    return {}
+    empty = np.array([], dtype=np.int32)
+    return empty, empty, empty, rater_uniques
 
   # --- Pass 2: fill arrays ---
   logger.info("Generating pair events...")
@@ -683,21 +662,5 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   del left_u, right_u, pair_boundary
   gc.collect()
   logger.info(f"Total unique pairs: {len(result_left):,}")
-
-  count_mask = pair_counts_arr >= minCoRatingCount
-  result_left = result_left[count_mask]
-  result_right = result_right[count_mask]
-  result_counts = pair_counts_arr[count_mask]
-  logger.info(f"Pairs with count >= {minCoRatingCount}: {len(result_left):,}")
-  _log_mem("after filtering")
-
-  # Convert to dict with original rater IDs
-  pair_counts = {}
-  for i in range(len(result_left)):
-    ri = rater_uniques[result_left[i]]
-    rj = rater_uniques[result_right[i]]
-    pair_counts[tuple(sorted((ri, rj)))] = int(result_counts[i])
-
-  logger.info(f"Output: {len(pair_counts):,} pairs")
   _log_mem("done")
-  return pair_counts
+  return result_left, result_right, pair_counts_arr, rater_uniques
