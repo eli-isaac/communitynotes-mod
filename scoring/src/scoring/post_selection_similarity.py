@@ -235,6 +235,12 @@ class PostSelectionSimilarity:
     )
 
   def compute_affinity_and_coverage(self, ratings, notes, latencyMins, minDenom=10):
+    """
+    Computes rater affinity and writer coverage metrics for a list of latency windows.
+    Returns a dataframe with columns [noteAuthorParticipantId, raterParticipantId, writerTotal,
+    raterTotal{latencyMins}m, pairTotal{latencyMins}m, raterAffinity{latencyMins}m,
+    writerCoverage{latencyMins}m] for each latency window.
+    """
     latencyMins = sorted(latencyMins, reverse=True)
 
     # Compute shared data once, reuse for all latency windows 
@@ -268,6 +274,7 @@ class PostSelectionSimilarity:
     return df[cols]
 
   def get_suspect_pairs(self, affinityAndCoverage):
+    """Returns a list of author-rater suspect pairs based on the affinity and coverage metrics."""
     thresholds = [
       ("writerCoverage1m", 0.2),
       ("writerCoverage5m", 0.3),
@@ -292,8 +299,9 @@ class PostSelectionSimilarity:
 
   def get_post_selection_similarity_values(self):
     """
-    Returns dataframe with [raterParticipantId, postSelectionSimilarityValue] columns.
-    postSelectionSimilarityValue is None by default.
+    Returns a dataframe with [raterParticipantId, postSelectionSimilarityValue] columns.
+    postSelectionSimilarityValue is the ID of the suspect clique that the rater belongs to.
+    There is one row for every rater that has been added to the internal suspectPairs set.
     """
     cliqueToUserMap, userToCliqueMap = aggregate_into_cliques(self.suspectPairs)
     logger.info(f"Aggregated into {len(cliqueToUserMap)} cliques")
@@ -536,7 +544,7 @@ def aggregate_into_cliques(suspectPairs):
 
 @njit(cache=True)
 def _count_pair_events(times, raters, group_starts, n_groups, n_total, window_millis):
-  """Count total windowed pair events for array pre-allocation."""
+  """Count total number of times a pair of raters co-rated a note within a sliding time window."""
   total = int64(0)
   for g in range(n_groups):
     start = group_starts[g]
@@ -590,31 +598,32 @@ def _log_mem(label):
 
 
 def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
-  """Compute pair co-rating counts preserving the per-note time window.
-
-  Uses Numba for windowed pair finding (outputting to arrays instead of hash
-  tables), then numpy sort-based dedup and run-length counting.
-
-  Pairs with count < minCoRatingCount are filtered out (they can't survive
-  the downstream PMI/minSim filter anyway).
   """
-  logger.info("Starting pair counts computation (Numba + array)")
+  Returns a dict of (rater_l, rater_r) => count of how many times they co-rated distinct tweets within windowMillis.
+  
+  Pairs with count < minCoRatingCount are filtered out (they can't survive the downstream PMI/minSim filter anyway).
+  """
+  logger.info("Starting pair counts computation")
   _log_mem("start")
 
-  # --- Preprocessing: factorize, sort, compute groups ---
+  # Factorize rater/tweet IDs to int32 codes
   rater_codes, rater_uniques = pd.factorize(ratings[c.raterParticipantIdKey])
   rater_arr = rater_codes.astype(np.int32)
+  n_raters = len(rater_uniques)
   del rater_codes
 
+  # Factorize tweet IDs to int32 codes
   tweet_codes, tweet_uniques = pd.factorize(ratings[c.tweetIdKey])
   tweet_arr = tweet_codes.astype(np.int32)
   n_tweets = len(tweet_uniques)
   del tweet_codes, tweet_uniques
 
+  # Factorize note IDs to int32 codes
   note_codes, _ = pd.factorize(ratings[c.noteIdKey])
   note_arr = note_codes.astype(np.int32)
   del note_codes
 
+  # Extract times as numpy int64 array
   times = ratings[c.createdAtMillisKey].values.astype(np.int64)
   _log_mem("after extracting arrays")
 
@@ -627,7 +636,7 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   del sort_idx
   gc.collect()
 
-  # Compute (tweet, note) group boundaries
+  # Compute note-group boundaries
   n = len(tweet_arr)
   group_mask = np.empty(n, dtype=np.bool_)
   group_mask[0] = True
@@ -635,13 +644,13 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   group_starts = np.where(group_mask)[0].astype(np.int64)
   n_groups = len(group_starts)
 
+  # Extract tweet IDs for each note group
   group_tweet_ids = tweet_arr[group_starts]
-  n_raters = len(rater_uniques)
   del tweet_arr, note_arr, group_mask
   gc.collect()
   _log_mem(f"after preprocessing: {n:,} ratings, {n_groups:,} groups")
 
-  # --- Pass 1: count pair events for allocation ---
+  # Count total number of times a pair of raters co-rated a note within windowMillis
   logger.info("Counting pair events...")
   total_events = _count_pair_events(
     times, rater_arr, group_starts, int64(n_groups), int64(n), int64(windowMillis),
@@ -659,6 +668,7 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   out_right = np.empty(total_events, dtype=np.int32)
   _log_mem("after allocating output arrays")
 
+  # this will fill the out_tweets, out_left, out_right arrays with the (tweet, rater_l, rater_r) pair events
   _fill_pair_events(
     times, rater_arr, group_starts, group_tweet_ids,
     int64(n_groups), int64(n), int64(windowMillis),
@@ -669,9 +679,7 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   gc.collect()
   _log_mem("after fill pass")
 
-  # --- Pack (left, right, tweet) into single int64, sort once ---
-  # Single contiguous sort is ~3x faster than lexsort on 3 separate arrays,
-  # and we can work on the compound key throughout without separate arrays.
+  # Pack the (rater_l, rater_r, tweet) triple into a single int64 using bit-shifting
   rater_bits = max(1, int(np.ceil(np.log2(max(n_raters, 2)))))
   tweet_bits = max(1, int(np.ceil(np.log2(max(n_tweets, 2)))))
   assert 2 * rater_bits + tweet_bits <= 63, (
@@ -688,11 +696,12 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   del out_left, out_right, out_tweets
   gc.collect()
 
+  # Sort the packed pair events so that we can deduplicate them
   logger.info("Sorting pair events...")
   compound.sort()
   _log_mem("after sort")
 
-  # Dedup: consecutive equal values = same (left, right, tweet) from multiple notes
+  # Dedup: consecutive equal values = same (rater_l, rater_r, tweet) from multiple notes
   dup_mask = np.empty(len(compound), dtype=np.bool_)
   dup_mask[0] = True
   dup_mask[1:] = compound[1:] != compound[:-1]
