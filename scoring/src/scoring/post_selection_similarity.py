@@ -635,6 +635,8 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   n_groups = len(group_starts)
 
   group_tweet_ids = tweet_arr[group_starts]
+  n_raters = len(rater_uniques)
+  n_tweets = int(group_tweet_ids.max()) + 1
   del tweet_arr, note_arr, group_mask
   gc.collect()
   _log_mem(f"after preprocessing: {n:,} ratings, {n_groups:,} groups")
@@ -667,49 +669,60 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   gc.collect()
   _log_mem("after fill pass")
 
-  # this sorting takes most of the time (about 13 minutes)
-  # --- Sort by (left, right, tweet) for combined dedup + counting ---
-  logger.info("Sorting pair events...")
-  sort_idx = np.lexsort((out_tweets, out_right, out_left))
-  left_s = out_left[sort_idx]
-  right_s = out_right[sort_idx]
-  tweet_s = out_tweets[sort_idx]
-  del out_left, out_right, out_tweets, sort_idx
+  # --- Pack (left, right, tweet) into single int64, sort once ---
+  # Single contiguous sort is ~3x faster than lexsort on 3 separate arrays,
+  # and we can work on the compound key throughout without separate arrays.
+  rater_bits = max(1, int(np.ceil(np.log2(max(n_raters, 2)))))
+  tweet_bits = max(1, int(np.ceil(np.log2(max(n_tweets, 2)))))
+  assert 2 * rater_bits + tweet_bits <= 63, (
+    f"IDs too large for int63 packing: {rater_bits}*2 + {tweet_bits} = {2 * rater_bits + tweet_bits}"
+  )
+  left_shift = rater_bits + tweet_bits
+  right_shift = tweet_bits
+
+  compound = (
+    (out_left.astype(np.int64) << left_shift) |
+    (out_right.astype(np.int64) << right_shift) |
+    out_tweets.astype(np.int64)
+  )
+  del out_left, out_right, out_tweets
   gc.collect()
+
+  logger.info("Sorting pair events...")
+  compound.sort()
   _log_mem("after sort")
 
-  # Dedup: remove duplicate (left, right, tweet) from multiple notes on same tweet
-  dup_mask = np.empty(total_events, dtype=np.bool_)
+  # Dedup: consecutive equal values = same (left, right, tweet) from multiple notes
+  dup_mask = np.empty(len(compound), dtype=np.bool_)
   dup_mask[0] = True
-  dup_mask[1:] = (
-    (left_s[1:] != left_s[:-1]) |
-    (right_s[1:] != right_s[:-1]) |
-    (tweet_s[1:] != tweet_s[:-1])
-  )
-  left_u = left_s[dup_mask]
-  right_u = right_s[dup_mask]
-  del left_s, right_s, tweet_s, dup_mask
+  dup_mask[1:] = compound[1:] != compound[:-1]
+  compound = compound[dup_mask]
+  del dup_mask
   gc.collect()
-  logger.info(f"After per-tweet dedup: {len(left_u):,} unique pair-tweet events")
+  logger.info(f"After per-tweet dedup: {len(compound):,} unique pair-tweet events")
   _log_mem("after dedup")
 
-  # Count per pair: data is already sorted by (left, right), so run-length encode
-  n_unique = len(left_u)
-  pair_boundary = np.empty(n_unique, dtype=np.bool_)
+  # Count per pair: drop tweet bits to get pair key, then run-length encode
+  pair_key = compound >> tweet_bits
+  pair_boundary = np.empty(len(pair_key), dtype=np.bool_)
   pair_boundary[0] = True
-  pair_boundary[1:] = (left_u[1:] != left_u[:-1]) | (right_u[1:] != right_u[:-1])
+  pair_boundary[1:] = pair_key[1:] != pair_key[:-1]
   pair_starts = np.where(pair_boundary)[0]
-  pair_counts_arr = np.diff(np.append(pair_starts, n_unique))
-  result_left = left_u[pair_starts]
-  result_right = right_u[pair_starts]
-  del left_u, right_u, pair_boundary
+  pair_counts_arr = np.diff(np.append(pair_starts, len(pair_key)))
+  del pair_key, pair_boundary
   gc.collect()
-  logger.info(f"Total unique pairs: {len(result_left):,}")
+  logger.info(f"Total unique pairs: {len(pair_starts):,}")
 
+  # Filter by minimum count, extract rater codes from surviving compound keys
   count_mask = pair_counts_arr >= minCoRatingCount
-  result_left = result_left[count_mask]
-  result_right = result_right[count_mask]
-  result_counts = pair_counts_arr[count_mask]
+  surviving = compound[pair_starts[count_mask]]
+  surviving_counts = pair_counts_arr[count_mask]
+  del compound, pair_starts, pair_counts_arr, count_mask
+  gc.collect()
+
+  rater_mask = (1 << rater_bits) - 1
+  result_left = ((surviving >> left_shift) & rater_mask).astype(np.int32)
+  result_right = ((surviving >> right_shift) & rater_mask).astype(np.int32)
   logger.info(f"Pairs with count >= {minCoRatingCount}: {len(result_left):,}")
   _log_mem("after filtering")
 
@@ -718,7 +731,7 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   for i in range(len(result_left)):
     ri = rater_uniques[result_left[i]]
     rj = rater_uniques[result_right[i]]
-    pair_counts[tuple(sorted((ri, rj)))] = int(result_counts[i])
+    pair_counts[tuple(sorted((ri, rj)))] = int(surviving_counts[i])
 
   logger.info(f"Output: {len(pair_counts):,} pairs")
   _log_mem("done")
