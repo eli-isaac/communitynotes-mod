@@ -184,3 +184,56 @@ This function in `post_selection_similarity.py` computes rater affinity and writ
   - ratings: `[raterParticipantIdKey, noteIdKey, createdAtMillisKey]`
   - notes: `[noteAuthorParticipantIdKey, noteIdKey, createdAtMillisKey]`
 - This makes the merge and all subsequent operations cheaper since the DataFrame is much narrower.
+
+---
+
+## 8. Rewrite `_get_pair_counts_dict` — eliminate hash table bottleneck
+
+**Date:** 2026-02-08 | **Before:** >1 hour / OOM at full scale | **After:** ~5 min
+
+This function counts how many tweets each pair of raters co-rated within a sliding time window. It is the most expensive step in the post-selection similarity pipeline. At full scale (~180M ratings, ~2M note groups), the original implementation produced ~1.5 billion unique rater pairs, consumed ~93GB of RAM in a single Python dict, and was killed by the OOM killer when the hash table tried to resize.
+
+### What the original did
+
+The original used nested `pandas.groupby` loops (tweets → notes) with a pure-Python sliding window and two Python dicts: `pair_counts` (pair → co-rating count) and `pairs_counted_in_tweet` (a set, recreated per tweet for dedup). Every pair comparison involved a hash table lookup into a dict that grew to 1.5B entries and ~93GB — far too large for CPU cache, making each lookup ~100-200ns (main-memory latency).
+
+### What the new version does
+
+The rewrite separates **pair finding** (Numba-compiled, outputs to arrays) from **dedup + counting** (numpy sort + vectorized ops), eliminating hash tables entirely.
+
+**Phase 1 — Preprocessing (numpy, ~30s):**
+- Factorize rater/tweet/note IDs to int32 codes.
+- Sort by `(note, time)` using `np.lexsort` and compute note-group boundaries vectorially.
+
+**Phase 2 — Windowed pair finding (Numba, ~2 min):**
+- Two compiled passes over the sorted data:
+  1. **Count pass**: counts how many `(tweet, rater_l, rater_r)` pair events the sliding window will emit — used to pre-allocate output arrays exactly.
+  2. **Fill pass**: writes the events into pre-allocated int32 arrays. Same sliding-window logic as the original, but writes to contiguous memory instead of doing hash table lookups.
+- The per-note time window (`windowMillis`, default 20 min) is preserved exactly.
+
+**Phase 3 — Dedup + counting (numpy, ~5 min):**
+- Packs each `(rater_l, rater_r, tweet)` triple into a single int64 using bit-shifting (dynamic bit allocation based on actual ID ranges). This allows a single `ndarray.sort()` call instead of `np.lexsort` over 3 separate arrays (~3x faster).
+- Deduplicates per-tweet pairs by comparing consecutive values in the sorted compound array (one vectorized comparison instead of three).
+- Counts co-rated tweets per pair via run-length encoding on the pair key (`compound >> tweet_bits`).
+- Pre-filters by `minCoRatingCount` before creating the output dict, reducing ~1.5B pairs to ~millions.
+
+### Pre-filter threshold (`minCoRatingCount`)
+
+The output dict only includes pairs whose count could survive the downstream PMI/minSim filter. The threshold is computed by a new helper, `_min_survivable_co_rating_count`, which lives directly above the filter function it mirrors. It checks both filter conditions (minSim and NPMI) with the most favorable rater totals and takes the lower minimum. With default parameters this evaluates to 8.
+
+### Results (full scale: 180M ratings, 2.15M note groups)
+
+| Stage | Time | RSS |
+|-------|------|-----|
+| Preprocessing (factorize, sort, groups) | ~90s | 39GB |
+| Numba count pass | 4s | 39GB |
+| Numba fill pass (2.2B pair events) | 11s | 62GB (peak) |
+| Compound key pack + sort | 58s | 54GB |
+| Dedup (1.8B unique tweet-pair events) | 11s | 51GB |
+| Count + filter (1.53B pairs → 3.66M with count ≥ 8) | 19s | 37GB |
+| Dict creation | 6s | 38GB |
+| **Total** | **3.3 min** | **62GB peak** |
+
+The pre-filter is critical: 1.53 billion unique pairs collapse to 3.66 million (0.24%) after applying the `minCoRatingCount=8` threshold.  The downstream PMI/minSim filter then runs in 9 seconds on the small dict, vs. the hours it would take on 1.53B entries.
+
+Peak 62GB vs. the original's 93GB (which then OOM'd on resize). No hash table at any point.

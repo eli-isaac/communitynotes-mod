@@ -606,9 +606,10 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   rater_arr = rater_codes.astype(np.int32)
   del rater_codes
 
-  tweet_codes, _ = pd.factorize(ratings[c.tweetIdKey])
+  tweet_codes, tweet_uniques = pd.factorize(ratings[c.tweetIdKey])
   tweet_arr = tweet_codes.astype(np.int32)
-  del tweet_codes
+  n_tweets = len(tweet_uniques)
+  del tweet_codes, tweet_uniques
 
   note_codes, _ = pd.factorize(ratings[c.noteIdKey])
   note_arr = note_codes.astype(np.int32)
@@ -636,7 +637,6 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
 
   group_tweet_ids = tweet_arr[group_starts]
   n_raters = len(rater_uniques)
-  n_tweets = int(group_tweet_ids.max()) + 1
   del tweet_arr, note_arr, group_mask
   gc.collect()
   _log_mem(f"after preprocessing: {n:,} ratings, {n_groups:,} groups")
