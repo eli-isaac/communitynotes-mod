@@ -29,7 +29,7 @@ python main.py \
   --outdir data \
   --cache-dir .cache
 
-# Second run — cached stages are skipped, jumps straight to _get_pair_counts_dict:
+# Second run — cached stages are skipped, jumps straight to Quasi-Cliques:
 python main.py \
   --notes data/notes-00000.tsv \
   --ratings data/ratings-00000.tsv \
@@ -71,29 +71,29 @@ There are **two cache files**, each covering a different section of the pipeline
 - Previous scored notes loading
 - Rating sampling (`--sample-ratings`)
 
-### 2. `pss_pre_pair_counts.pkl` — PSS Intermediate State
+### 2. `pss_complete.pkl` — Full Post Selection Similarity Output
 
-**Saved in:** `post_selection_similarity.py` → `PostSelectionSimilarity.__init__()`,
-right *before* `_get_pair_counts_dict()` is called.
+**Saved in:** `run_scoring.py` → `run_rater_clustering()`,
+right *before* `Compute Quasi-Cliques` is called.
 
 **Contains:**
 
-| Key                   | Type             | Description                                               |
-|-----------------------|------------------|-----------------------------------------------------------|
-| `affinityAndCoverage` | `pd.DataFrame`   | Rater affinity and writer coverage metrics (~3.5 min)     |
-| `suspectPairs`        | `list[tuple]`    | Pairs flagged by affinity/coverage thresholds             |
-| `ratings`             | `pd.DataFrame`   | Preprocessed ratings joined with note tweetIds (~2.5 min) |
+| Key                            | Type             | Description                                                      |
+|--------------------------------|------------------|------------------------------------------------------------------|
+| `postSelectionSimilarityValues`| `pd.DataFrame`   | Final PSS output (rater → clique mapping)                        |
 
 **What it skips on cache hit:**
 - Helpful ratings filtering
 - `compute_affinity_and_coverage()` (~3.5 minutes)
 - `get_suspect_pairs()`
 - `_preprocess_ratings()` (~2.5 minutes)
+- `_get_pair_counts_dict()`
+- PMI/MinSim computation
+- `aggregate_into_cliques()`
+- `get_post_selection_similarity_values()`
 
 **What still runs (always):**
-- `_get_pair_counts_dict()` — this is the current dev target
-- PMI/MinSim computation
-- Clique aggregation
+- Quasi-Clique detection
 - Everything downstream (prescoring, final scoring, contributor scoring)
 
 ---
@@ -112,13 +112,11 @@ _run_scorer()
        │
        ├─ run_rater_clustering()
        │    │
-       │    └─ PostSelectionSimilarity.__init__()
-       │         │
-       │         ├─ [CACHE: pss_pre_pair_counts] ── cache hit?  → load from cache
-       │         │                                   cache miss? → compute & save
-       │         │
-       │         ├─ _get_pair_counts_dict()         ← ALWAYS RUNS (dev target)
-       │         └─ PMI/MinSim/cliques              ← always runs
+       │    ├─ [CACHE: pss_complete] ── cache hit?  → load from cache, skip PSS
+       │    │                             cache miss? → compute PSS & save
+       │    │
+       │    ├─ PostSelectionSimilarity.__init__()    ← skipped on cache hit
+       │    └─ get_post_selection_similarity_values() ← skipped on cache hit
        │
        ├─ run_prescoring()                          ← always runs
        ├─ run_final_note_scoring()                  ← always runs
@@ -148,12 +146,12 @@ All functions are no-ops when caching is disabled (i.e., `--cache-dir` not passe
 3. **`main()`:** Calls `dev_cache.configure(args.cache_dir)` before `_run_scorer`.
 4. **`_run_scorer()`:** Wrapped the data-loading block in a cache check/save.
 
-### Modified: `scoring/src/scoring/post_selection_similarity.py`
+### Modified: `scoring/src/scoring/run_scoring.py`
 
 1. **Import:** Added `from . import dev_cache`.
-2. **`PostSelectionSimilarity.__init__()`:** Wrapped the pre-`_get_pair_counts_dict`
-   computation (affinity/coverage, suspect pairs, ratings preprocessing) in a
-   cache check/save. `_get_pair_counts_dict` and everything after it always runs.
+2. **`run_rater_clustering()`:** Wrapped the entire Post Selection Similarity
+   computation in a cache check/save. On cache hit, skips straight to
+   Quasi-Clique detection.
 
 ---
 
@@ -170,8 +168,8 @@ Caches are **not** automatically invalidated. You must manually delete them when
 # Delete everything:
 rm -rf .cache
 
-# Delete just the PSS cache (re-run affinity/coverage but keep data loading cache):
-rm .cache/pss_pre_pair_counts.pkl
+# Delete just the PSS cache (re-run full PSS but keep data loading cache):
+rm .cache/pss_complete.pkl
 
 # Delete just the data loading cache (re-parse TSVs but keep PSS cache):
 rm .cache/runner_data.pkl
@@ -184,7 +182,7 @@ rm .cache/runner_data.pkl
 Expect the cache files to be large — they contain full DataFrames:
 
 - `runner_data.pkl`: Typically **several GB** (contains all input DataFrames).
-- `pss_pre_pair_counts.pkl`: Typically **hundreds of MB to a few GB**.
+- `pss_complete.pkl`: Typically **small** (just the rater-to-clique mapping DataFrame).
 
 Make sure the cache directory has sufficient disk space, and add it to
 `.gitignore` if it's inside the repo.

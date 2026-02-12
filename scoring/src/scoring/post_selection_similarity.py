@@ -1,9 +1,8 @@
 import gc
 import logging
-import sys
 from typing import Dict
 
-from . import constants as c, dev_cache
+from . import constants as c
 
 import numpy as np
 import pandas as pd
@@ -11,32 +10,6 @@ from numba import njit, int64
 
 
 logger = logging.getLogger("birdwatch.post_selection_similarity")
-
-
-def _mem_gb():
-  """Current process RSS in GB. Falls back to max RSS if /proc unavailable."""
-  try:
-    with open("/proc/self/status") as f:
-      for line in f:
-        if line.startswith("VmRSS:"):
-          return int(line.split()[1]) / (1024 * 1024)
-  except FileNotFoundError:
-    pass
-  import resource
-  ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-  return ru / (1024 ** 3) if sys.platform == "darwin" else ru / (1024 * 1024)
-
-
-def _mem_available_gb():
-  """Available system memory in GB, or None if unknown."""
-  try:
-    with open("/proc/meminfo") as f:
-      for line in f:
-        if line.startswith("MemAvailable:"):
-          return int(line.split()[1]) / (1024 * 1024)
-  except FileNotFoundError:
-    return None
-logger.setLevel(logging.INFO)
 
 
 class PostSelectionSimilarity:
@@ -51,46 +24,18 @@ class PostSelectionSimilarity:
     minSimPseudocounts: int = 10,
     windowMillis: int = 1000 * 60 * 20,
   ):
-    # Try loading cached state computed before _get_pair_counts_dict.
-    # When the cache hits, everything above _get_pair_counts_dict is skipped.
-    cached = dev_cache.load("pss_pre_pair_counts")
-    if cached is not None:
-      self.affinityAndCoverage = cached["affinityAndCoverage"]
-      self.suspectPairs = cached["suspectPairs"]
-      self.ratings = cached["ratings"]
-      logger.info("Restored PSS intermediate state from cache — skipping to _get_pair_counts_dict")
-    else:
-      # Compute rater affinity and writer coverage.  Apply thresholds to identify linked pairs.
-      logger.info("Computing rater affinity and writer coverage")
-      # this takes 14 seconds to run
-      helpful_mask = ratings[c.helpfulnessLevelKey] == c.helpfulValueTsv
-      helpfulRatings = ratings.loc[helpful_mask, [c.raterParticipantIdKey, c.noteIdKey, c.createdAtMillisKey]]
-      logger.info(f"Computing rater affinity and writer coverage for {len(helpfulRatings)} helpful ratings")
-      # this takes 3.5 minutes to run
-      self.affinityAndCoverage = self.compute_affinity_and_coverage(helpfulRatings, notes, [1, 5, 20])
-      logger.info(f"Computed rater affinity and writer coverage for {len(self.affinityAndCoverage)} pairs")
+    # Compute rater affinity and writer coverage.  Apply thresholds to identify linked pairs.
+    helpful_mask = ratings[c.helpfulnessLevelKey] == c.helpfulValueTsv
+    helpfulRatings = ratings.loc[helpful_mask, [c.raterParticipantIdKey, c.noteIdKey, c.createdAtMillisKey]]
+    self.affinityAndCoverage = self.compute_affinity_and_coverage(helpfulRatings, notes, [1, 5, 20])
+    self.suspectPairs = self.get_suspect_pairs(self.affinityAndCoverage)
 
-      # runs quickly
-      self.suspectPairs = self.get_suspect_pairs(self.affinityAndCoverage)
-      logger.info(f"Found {len(self.suspectPairs)} suspect pairs")
+    # Compute MinSim and NPMI
+    self.ratings = _preprocess_ratings(notes, ratings)
 
-      # Compute MinSim and NPMI
-      # this takes 2.5 minutes to run
-      self.ratings = _preprocess_ratings(notes, ratings)
-      logger.info(f"Preprocessed ratings for {len(self.ratings)} ratings")
-
-      # Save cache so next run can skip straight to _get_pair_counts_dict.
-      dev_cache.save("pss_pre_pair_counts", {
-        "affinityAndCoverage": self.affinityAndCoverage,
-        "suspectPairs": self.suspectPairs,
-        "ratings": self.ratings,
-      })
-
-    # ---- RESUME POINT: _get_pair_counts_dict (the function being iterated on) ----
     self.uniqueRatingsOnTweets = self.ratings[
       [c.tweetIdKey, c.raterParticipantIdKey]
     ].drop_duplicates()
-    logger.info(f"Computed unique ratings on tweets for {len(self.uniqueRatingsOnTweets)} ratings")
     raterTotals = self.uniqueRatingsOnTweets[c.raterParticipantIdKey].value_counts()
     raterTotalsDict = {
       index: value for index, value in raterTotals.items() if value >= minUniquePosts
@@ -101,13 +46,11 @@ class PostSelectionSimilarity:
       N, pmiRegularization, minSimPseudocounts,
       smoothedNpmiThreshold, minimumRatingProportionThreshold, minUniquePosts,
     )
-    logger.info(f"Pre-filter threshold: minCoRatingCount={minCoRatingCount}")
 
     with c.time_block("Compute pair counts dict"):
       self.pairCountsDict = _get_pair_counts_dict(
         self.ratings, windowMillis=windowMillis, minCoRatingCount=minCoRatingCount,
       )
-    logger.info(f"Computed pair counts dict for {len(self.pairCountsDict)} pairs")
 
     self.pairCountsDict = _join_rater_totals_compute_pmi_and_filter_edges_below_threshold(
       pairCountsDict=self.pairCountsDict,
@@ -119,11 +62,9 @@ class PostSelectionSimilarity:
       minimumRatingProportionThreshold=minimumRatingProportionThreshold,
     )
     self.suspectPairs = set(self.suspectPairs + list(self.pairCountsDict.keys()))
-    logger.info(f"Computed suspect pairs for {len(self.suspectPairs)} pairs")
     
   def _merge_ratings_and_notes(self, ratings, notes):
     """Merge ratings with notes and compute latency. Done once, shared across all latency windows."""
-    logger.info(f"Merging ratings and notes for {len(ratings)} ratings")
     ratings = ratings[[c.raterParticipantIdKey, c.noteIdKey, c.createdAtMillisKey]].rename(
       columns={c.createdAtMillisKey: "ratingMillis"}
     )
@@ -132,7 +73,6 @@ class PostSelectionSimilarity:
     )
     merged = ratings.merge(notes)
     merged["latency"] = merged["ratingMillis"] - merged["noteMillis"]
-    logger.info(f"Merged ratings and notes: {len(merged)} rows")
     return merged
 
   def _compute_writer_totals(self, notes):
@@ -145,7 +85,6 @@ class PostSelectionSimilarity:
       .reset_index(drop=False)
       .rename(columns={"count": "writerTotal"})
     )
-    logger.info(f"Computed writer totals for {len(writerTotals)} writers")
     return writerTotals
 
   def _compute_affinity_and_coverage_for_latency(self, merged, writerTotals, latencyMins, minDenom):
@@ -174,9 +113,7 @@ class PostSelectionSimilarity:
       raterTotal{latencyMins}m, pairTotal{latencyMins}m, raterAffinity{latencyMins}m,
       writerCoverage{latencyMins}m].
     """
-    logger.info(f"Computing affinity and coverage for {latencyMins}m window")
     ratings = merged[merged["latency"] <= (1000 * 60 * latencyMins)]
-    logger.info(f"Filtered to {len(ratings)} ratings within {latencyMins}m")
 
     # Compute rater and pair totals
     raterTotals = (
@@ -186,22 +123,14 @@ class PostSelectionSimilarity:
       .reset_index(drop=False)
       .rename(columns={"count": f"raterTotal{latencyMins}m"})
     )
-    logger.info(f"Computed rater totals for {len(raterTotals)} raters")
-    # rating totals takes about 7 seconds to run
     ratingTotals = (
       ratings[[c.noteAuthorParticipantIdKey, c.raterParticipantIdKey]]
       .value_counts()
       .reset_index(drop=False)
       .rename(columns={"count": f"pairTotal{latencyMins}m"})
     )
-    logger.info(f"Computed pair totals for {len(ratingTotals)} pairs")
     ratingTotals = ratingTotals.merge(writerTotals, how="left")
-    logger.info("Merged writer totals")
     ratingTotals = ratingTotals.merge(raterTotals, how="left")
-    logger.info("Merged rater totals")
-
-    # our df now has these columns:
-    # noteAuthorParticipantId, raterParticipantId, writerTotal, raterTotal{latencyMins}m, pairTotal{latencyMins}m
 
     # Compute ratios
     ratingTotals[f"raterAffinity{latencyMins}m"] = (
@@ -216,7 +145,6 @@ class PostSelectionSimilarity:
     ratingTotals.loc[
       ratingTotals["writerTotal"] < minDenom, f"writerCoverage{latencyMins}m"
     ] = pd.NA
-    logger.info(f"Computed affinity and coverage for {len(ratingTotals)} pairs at {latencyMins}m")
     return ratingTotals[
       [
         c.noteAuthorParticipantIdKey,
@@ -243,14 +171,11 @@ class PostSelectionSimilarity:
     """
     latencyMins = sorted(latencyMins, reverse=True)
 
-    # Compute shared data once, reuse for all latency windows 
+    # Compute shared data once, reuse for all latency windows
     merged = self._merge_ratings_and_notes(ratings, notes)
-    logger.info("Computed merged data")
     writerTotals = self._compute_writer_totals(notes)
-    logger.info("Computed writer totals")
 
     df = self._compute_affinity_and_coverage_for_latency(merged, writerTotals, latencyMins[0], minDenom)
-    logger.info("Computed affinity and coverage for 1m window")
 
     origLen = len(df)
     for latency in latencyMins[1:]:
@@ -259,7 +184,6 @@ class PostSelectionSimilarity:
         on=[c.noteAuthorParticipantIdKey, c.raterParticipantIdKey, "writerTotal"],
         how="left",
       )
-      logger.info(f"Computed and merged affinity and coverage for {latency}m window")
       assert len(df) == origLen
     cols = [c.noteAuthorParticipantIdKey, c.raterParticipantIdKey, "writerTotal"]
     for latency in sorted(latencyMins):
@@ -304,7 +228,6 @@ class PostSelectionSimilarity:
     There is one row for every rater that has been added to the internal suspectPairs set.
     """
     cliqueToUserMap, userToCliqueMap = aggregate_into_cliques(self.suspectPairs)
-    logger.info(f"Aggregated into {len(cliqueToUserMap)} cliques")
     # Convert dict to pandas dataframe
     cliquesDfList = []
     for cliqueId in cliqueToUserMap.keys():
@@ -313,7 +236,6 @@ class PostSelectionSimilarity:
     cliquesDf = pd.DataFrame(
       cliquesDfList, columns=[c.raterParticipantIdKey, c.postSelectionValueKey]
     )
-    logger.info(f"Computed cliques dataframe for {len(cliquesDf)} cliques")
     return cliquesDf
 
 
@@ -486,15 +408,9 @@ def _join_rater_totals_compute_pmi_and_filter_edges_below_threshold(
       else:
         keys_to_delete.append((leftRaterId, rightRaterId))
 
-    print(f"Pairs dict used {sys.getsizeof(pairCountsDict) * 1e-9}GB RAM at max")
-
   with c.time_block("Delete unneeded pairs from pairCountsDict"):
     for key in keys_to_delete:
       del pairCountsDict[key]
-
-  print(
-    f"Pairs dict used {sys.getsizeof(pairCountsDict) * 1e-9}GB RAM after deleted unneeded pairs"
-  )
 
   return pairCountsDict
 
@@ -591,21 +507,12 @@ def _fill_pair_events(times, raters, group_starts, group_tweet_ids,
   return pos
 
 
-def _log_mem(label):
-  avail = _mem_available_gb()
-  avail_str = f", available: {avail:.1f}GB" if avail is not None else ""
-  logger.info(f"[mem] {label}: RSS {_mem_gb():.1f}GB{avail_str}")
-
-
 def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   """
   Returns a dict of (rater_l, rater_r) => count of how many times they co-rated distinct tweets within windowMillis.
-  
+
   Pairs with count < minCoRatingCount are filtered out (they can't survive the downstream PMI/minSim filter anyway).
   """
-  logger.info("Starting pair counts computation")
-  _log_mem("start")
-
   # Factorize rater/tweet IDs to int32 codes
   rater_codes, rater_uniques = pd.factorize(ratings[c.raterParticipantIdKey])
   rater_arr = rater_codes.astype(np.int32)
@@ -625,7 +532,6 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
 
   # Extract times as numpy int64 array
   times = ratings[c.createdAtMillisKey].values.astype(np.int64)
-  _log_mem("after extracting arrays")
 
   # Sort by (note, time) for contiguous grouped access
   sort_idx = np.lexsort((times, note_arr))
@@ -648,27 +554,20 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   group_tweet_ids = tweet_arr[group_starts]
   del tweet_arr, note_arr, group_mask
   gc.collect()
-  _log_mem(f"after preprocessing: {n:,} ratings, {n_groups:,} groups")
 
-  # Count total number of times a pair of raters co-rated a note within windowMillis
-  logger.info("Counting pair events...")
+  # Pass 1: count total pair events
   total_events = _count_pair_events(
     times, rater_arr, group_starts, int64(n_groups), int64(n), int64(windowMillis),
   )
-  logger.info(f"Total pair events: {total_events:,}")
-  _log_mem("after count pass")
 
   if total_events == 0:
     return {}
 
-  # --- Pass 2: fill arrays ---
-  logger.info("Generating pair events...")
+  # Pass 2: fill arrays
   out_tweets = np.empty(total_events, dtype=np.int32)
   out_left = np.empty(total_events, dtype=np.int32)
   out_right = np.empty(total_events, dtype=np.int32)
-  _log_mem("after allocating output arrays")
 
-  # this will fill the out_tweets, out_left, out_right arrays with the (tweet, rater_l, rater_r) pair events
   _fill_pair_events(
     times, rater_arr, group_starts, group_tweet_ids,
     int64(n_groups), int64(n), int64(windowMillis),
@@ -677,7 +576,6 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
 
   del times, rater_arr, group_starts, group_tweet_ids
   gc.collect()
-  _log_mem("after fill pass")
 
   # Pack the (rater_l, rater_r, tweet) triple into a single int64 using bit-shifting
   rater_bits = max(1, int(np.ceil(np.log2(max(n_raters, 2)))))
@@ -696,20 +594,15 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   del out_left, out_right, out_tweets
   gc.collect()
 
-  # Sort the packed pair events so that we can deduplicate them
-  logger.info("Sorting pair events...")
+  # Sort and deduplicate
   compound.sort()
-  _log_mem("after sort")
 
-  # Dedup: consecutive equal values = same (rater_l, rater_r, tweet) from multiple notes
   dup_mask = np.empty(len(compound), dtype=np.bool_)
   dup_mask[0] = True
   dup_mask[1:] = compound[1:] != compound[:-1]
   compound = compound[dup_mask]
   del dup_mask
   gc.collect()
-  logger.info(f"After per-tweet dedup: {len(compound):,} unique pair-tweet events")
-  _log_mem("after dedup")
 
   # Count per pair: drop tweet bits to get pair key, then run-length encode
   pair_key = compound >> tweet_bits
@@ -720,7 +613,6 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   pair_counts_arr = np.diff(np.append(pair_starts, len(pair_key)))
   del pair_key, pair_boundary
   gc.collect()
-  logger.info(f"Total unique pairs: {len(pair_starts):,}")
 
   # Filter by minimum count, extract rater codes from surviving compound keys
   count_mask = pair_counts_arr >= minCoRatingCount
@@ -732,8 +624,6 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
   rater_mask = (1 << rater_bits) - 1
   result_left = ((surviving >> left_shift) & rater_mask).astype(np.int32)
   result_right = ((surviving >> right_shift) & rater_mask).astype(np.int32)
-  logger.info(f"Pairs with count >= {minCoRatingCount}: {len(result_left):,}")
-  _log_mem("after filtering")
 
   # Convert to dict with original rater IDs
   pair_counts = {}
@@ -742,6 +632,4 @@ def _get_pair_counts_dict(ratings, windowMillis, minCoRatingCount=5):
     rj = rater_uniques[result_right[i]]
     pair_counts[tuple(sorted((ri, rj)))] = int(surviving_counts[i])
 
-  logger.info(f"Output: {len(pair_counts):,} pairs")
-  _log_mem("done")
   return pair_counts

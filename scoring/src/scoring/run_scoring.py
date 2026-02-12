@@ -16,7 +16,7 @@ import os
 import time
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-from . import constants as c, contributor_state, note_ratings, note_status_history, scoring_rules
+from . import constants as c, contributor_state, dev_cache, note_ratings, note_status_history, scoring_rules
 from .constants import FinalScoringArgs, ModelResult, PrescoringArgs, ScoringArgs
 from .enums import Scorers, Topics
 from .gaussian_scorer import GaussianScorer
@@ -1178,11 +1178,19 @@ def _validate_contributor_scoring_output(
 
 
 def run_rater_clustering(notes: pd.DataFrame, ratings: pd.DataFrame) -> pd.DataFrame:
-  with c.time_block("Compute Post Selection Similarity"):
-    pss = PostSelectionSimilarity(notes, ratings)
-    postSelectionSimilarityValues = pss.get_post_selection_similarity_values()
-    del pss
-    gc.collect()
+  cached = dev_cache.load("pss_complete")
+  if cached is not None:
+    postSelectionSimilarityValues = cached["postSelectionSimilarityValues"]
+    logger.info("Restored postSelectionSimilarityValues from cache — skipping to Quasi-Cliques")
+  else:
+    with c.time_block("Compute Post Selection Similarity"):
+      pss = PostSelectionSimilarity(notes, ratings)
+      postSelectionSimilarityValues = pss.get_post_selection_similarity_values()
+      del pss
+      gc.collect()
+    dev_cache.save("pss_complete", {
+      "postSelectionSimilarityValues": postSelectionSimilarityValues,
+    })
   with c.time_block("Compute Quasi-Cliques"):
     qcd = QuasiCliqueDetection()
     quasiCliques = qcd.get_quasi_cliques(notes, ratings)
