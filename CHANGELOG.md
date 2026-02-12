@@ -237,3 +237,34 @@ The output dict only includes pairs whose count could survive the downstream PMI
 The pre-filter is critical: 1.53 billion unique pairs collapse to 3.66 million (0.24%) after applying the `minCoRatingCount=8` threshold.  The downstream PMI/minSim filter then runs in 9 seconds on the small dict, vs. the hours it would take on 1.53B entries.
 
 Peak 62GB vs. the original's 93GB (which then OOM'd on resize). No hash table at any point.
+
+---
+
+## 9. Rewrite `_get_pair_counts` in quasi-clique detection
+
+**Date:** 2026-02-08 | **Before:** ~40s (10% sample) | **After:** ~3s (10% sample)
+
+The `_get_pair_counts` method in `QuasiCliqueDetection` counts how many tweets each rater pair rates in the same way (same note, same `helpfulNum`), deduped per tweet. Structurally identical to the PSS pair counting but simpler: no time window, and the data is pre-filtered to recent misleading notes (13 weeks), making it much smaller.
+
+### What the original did
+
+Used `pandas.groupby(...).agg(list)` to build nested Python lists of raters, then a triple-nested Python loop over tweets → note groups → rater pairs, with a per-tweet `set()` for dedup and a global `dict()` for counting. At 10% sample: ~97K tweets iterated one-by-one with per-1000 progress logging.
+
+### What the new version does
+
+Same Numba + array + compound-key approach as PSS entry #8:
+
+1. Factorize IDs, sort by `(noteId, helpfulNum)`, compute group boundaries.
+2. Compute total pair events exactly from group sizes — `sum(k*(k-1)/2)` — no Numba count pass needed (no time window means every pair in a group counts).
+3. Single Numba pass fills pre-allocated int32 arrays with `(tweet, rater_l, rater_r)` events.
+4. Pack into int64 compound key, in-place sort, vectorized dedup, run-length count.
+5. Filter by `minAlignedRatings` (default 5) and map codes back to original IDs.
+
+### Results (10% sample: 1.4M filtered ratings, 202K groups)
+
+| | Original | New |
+|---|---|---|
+| Pair counting | ~21s (Python loop over 97K tweets) | ~2s (Numba fill + numpy sort on 29M events) |
+| Total `_get_pair_counts` | ~27s | ~4s |
+| Total quasi-clique step | 40s | 16s |
+| Output pair counts | 4,643 | 4,643 (identical) |

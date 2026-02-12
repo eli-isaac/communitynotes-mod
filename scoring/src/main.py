@@ -20,7 +20,7 @@ Example Usage:
     --status data/noteStatusHistory-00000.tsv \
     --outdir data \
     --sample-ratings 0.1 \
-    --cache-dir .cache
+    --cache-dir .cache10
 """
 
 import logging
