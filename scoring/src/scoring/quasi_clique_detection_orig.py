@@ -86,6 +86,9 @@ class QuasiCliqueDetection:
       .agg(list)
       .reset_index(drop=False)
     )
+    # tweetId, [(note1) [raterId1, raterId2], (note2) [raterId1, raterId2] ]
+    # lists, each element is tweet, inside that each element is either different note or different rating 
+  
     raterPairCounts = dict()
     logger.info(f"Preparing pairs for {len(tweetNoteCollisions)} tweets")
     for idx, (_, tweetNoteRaters) in enumerate(tweetNoteCollisions.values):

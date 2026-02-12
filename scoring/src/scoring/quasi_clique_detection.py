@@ -19,7 +19,7 @@ logger.setLevel(logging.INFO)
 @njit(cache=True)
 def _fill_group_pairs(raters, group_starts, group_tweet_ids, n_groups, n_total,
                       out_tweets, out_left, out_right):
-  """Emit all C(k,2) pairs per group into pre-allocated arrays. No time window."""
+  """Emit all C(k,2) pairs per group into pre-allocated arrays."""
   pos = int64(0)
   for g in range(n_groups):
     start = group_starts[g]
@@ -141,7 +141,7 @@ class QuasiCliqueDetection:
     del tweet_arr, note_arr, helpful_arr, group_mask
     gc.collect()
 
-    # Compute total pair events from group sizes (exact, no Numba needed)
+    # Compute total pair events from group sizes
     group_sizes = np.diff(np.append(group_starts, n)).astype(np.int64)
     total_events = int(np.sum(group_sizes * (group_sizes - 1) // 2))
     del group_sizes
