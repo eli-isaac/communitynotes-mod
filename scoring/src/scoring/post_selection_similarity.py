@@ -236,6 +236,7 @@ class PostSelectionSimilarity:
     cliquesDf = pd.DataFrame(
       cliquesDfList, columns=[c.raterParticipantIdKey, c.postSelectionValueKey]
     )
+    cliquesDf[c.postSelectionValueKey] = cliquesDf[c.postSelectionValueKey].astype(pd.Int64Dtype())
     return cliquesDf
 
 

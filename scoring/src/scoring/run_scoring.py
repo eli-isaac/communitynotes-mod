@@ -1197,7 +1197,11 @@ def run_rater_clustering(notes: pd.DataFrame, ratings: pd.DataFrame) -> pd.DataF
     del qcd
     gc.collect()
   # Return combined dataframe
-  return postSelectionSimilarityValues.merge(quasiCliques, how="outer")
+  logger.info(f"postSelectionSimilarityValues: {len(postSelectionSimilarityValues)}")
+  logger.info(f"quasiCliques: {len(quasiCliques)}")
+  result = postSelectionSimilarityValues.merge(quasiCliques, how="outer")
+  logger.info(f"result: {len(result)}")
+  return result
 
 
 def run_prescoring(
