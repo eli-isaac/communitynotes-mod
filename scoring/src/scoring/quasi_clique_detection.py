@@ -82,7 +82,12 @@ class QuasiCliqueDetection:
     cutoff: int,
     minAlignedRatings: int = 5,
   ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Return counts of how many times raters rate notes in the same way, and all ratings for raters who do so >5 times."""
+    """Computes counts of how many times raters rate notes in the same way, and all ratings for raters who do so >5 times.
+    
+    Returns:
+      - counts: DataFrame with columns "left", "right", "count"
+      - ratings: DataFrame with ratings for raters who do so >5 times
+    """
     # Identify ratings that are in scope
     logger.info(f"initial rating length: {len(ratings)}")
 

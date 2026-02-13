@@ -1,4 +1,5 @@
 # Std libraries
+import gc
 import logging
 from typing import Set, Tuple
 
@@ -6,11 +7,37 @@ from typing import Set, Tuple
 from . import constants as c
 
 # 3rd-party libraries
+import numpy as np
 import pandas as pd
+from numba import njit, int64
 
 
 logger = logging.getLogger("birdwatch.quasi_clique_detection")
 logger.setLevel(logging.INFO)
+
+
+@njit(cache=True)
+def _fill_group_pairs(raters, group_starts, group_tweet_ids, n_groups, n_total,
+                      out_tweets, out_left, out_right):
+  """Emit all C(k,2) pairs per group into pre-allocated arrays."""
+  pos = int64(0)
+  for g in range(n_groups):
+    start = group_starts[g]
+    end = group_starts[g + 1] if g + 1 < n_groups else n_total
+    if end - start < 2:
+      continue
+    tweet = group_tweet_ids[g]
+    for i in range(start, end):
+      for j in range(i + 1, end):
+        out_tweets[pos] = tweet
+        if raters[i] < raters[j]:
+          out_left[pos] = raters[i]
+          out_right[pos] = raters[j]
+        else:
+          out_left[pos] = raters[j]
+          out_right[pos] = raters[i]
+        pos += 1
+  return pos
 
 
 class QuasiCliqueDetection:
@@ -73,50 +100,127 @@ class QuasiCliqueDetection:
     logger.info(f"ratings on non-deleted tweets: {len(ratings)}")
     ratings = ratings[ratings[c.classificationKey] == c.notesSaysTweetIsMisleadingKey]
     logger.info(f"ratings on misleading posts: {len(ratings)}")
-    # Identify pairs
+    # Identify pairs using Numba + array-based dedup (same approach as PSS)
     ratings = ratings[[c.tweetIdKey, c.noteIdKey, c.helpfulNumKey, c.raterParticipantIdKey]]
-    noteCollisions = (
-      ratings.groupby([c.tweetIdKey, c.noteIdKey, c.helpfulNumKey])
-      .agg(list)
-      .reset_index(drop=False)
+
+    # Factorize IDs to int32 codes
+    rater_codes, rater_uniques = pd.factorize(ratings[c.raterParticipantIdKey])
+    rater_arr = rater_codes.astype(np.int32)
+    del rater_codes
+
+    tweet_codes, _ = pd.factorize(ratings[c.tweetIdKey])
+    tweet_arr = tweet_codes.astype(np.int32)
+    n_tweets = int(tweet_codes.max()) + 1
+    del tweet_codes
+
+    note_codes, _ = pd.factorize(ratings[c.noteIdKey])
+    note_arr = note_codes.astype(np.int32)
+    del note_codes
+
+    helpful_codes, _ = pd.factorize(ratings[c.helpfulNumKey])
+    helpful_arr = helpful_codes.astype(np.int32)
+    del helpful_codes
+
+    # Sort by (note, helpfulNum) for contiguous group access
+    sort_idx = np.lexsort((helpful_arr, note_arr))
+    tweet_arr = tweet_arr[sort_idx]
+    note_arr = note_arr[sort_idx]
+    helpful_arr = helpful_arr[sort_idx]
+    rater_arr = rater_arr[sort_idx]
+    del sort_idx
+
+    # Compute (note, helpfulNum) group boundaries
+    n = len(rater_arr)
+    group_mask = np.empty(n, dtype=np.bool_)
+    group_mask[0] = True
+    group_mask[1:] = (note_arr[1:] != note_arr[:-1]) | (helpful_arr[1:] != helpful_arr[:-1])
+    group_starts = np.where(group_mask)[0].astype(np.int64)
+    n_groups = len(group_starts)
+    group_tweet_ids = tweet_arr[group_starts]
+    n_raters = len(rater_uniques)
+    del tweet_arr, note_arr, helpful_arr, group_mask
+    gc.collect()
+
+    # Compute total pair events from group sizes
+    group_sizes = np.diff(np.append(group_starts, n)).astype(np.int64)
+    total_events = int(np.sum(group_sizes * (group_sizes - 1) // 2))
+    del group_sizes
+    logger.info(f"Total pair events: {total_events:,} across {n_groups:,} groups")
+
+    if total_events == 0:
+      return pd.DataFrame(columns=["left", "right", "count"]), ratings.iloc[:0]
+
+    # Fill pair arrays with Numba
+    out_tweets = np.empty(total_events, dtype=np.int32)
+    out_left = np.empty(total_events, dtype=np.int32)
+    out_right = np.empty(total_events, dtype=np.int32)
+    _fill_group_pairs(
+      rater_arr, group_starts, group_tweet_ids,
+      int64(n_groups), int64(n),
+      out_tweets, out_left, out_right,
     )
-    tweetNoteCollisions = (
-      noteCollisions[[c.tweetIdKey, c.raterParticipantIdKey]]
-      .groupby(c.tweetIdKey)
-      .agg(list)
-      .reset_index(drop=False)
+    del rater_arr, group_starts, group_tweet_ids
+    gc.collect()
+
+    # Pack into single int64, sort, dedup per tweet, count per pair
+    rater_bits = max(1, int(np.ceil(np.log2(max(n_raters, 2)))))
+    tweet_bits = max(1, int(np.ceil(np.log2(max(n_tweets, 2)))))
+    assert 2 * rater_bits + tweet_bits <= 63
+    left_shift = rater_bits + tweet_bits
+    right_shift = tweet_bits
+
+    compound = (
+      (out_left.astype(np.int64) << left_shift) |
+      (out_right.astype(np.int64) << right_shift) |
+      out_tweets.astype(np.int64)
     )
-    # tweetId, [(note1) [raterId1, raterId2], (note2) [raterId1, raterId2] ]
-    # lists, each element is tweet, inside that each element is either different note or different rating 
-  
-    raterPairCounts = dict()
-    logger.info(f"Preparing pairs for {len(tweetNoteCollisions)} tweets")
-    for idx, (_, tweetNoteRaters) in enumerate(tweetNoteCollisions.values):
-      if idx % 1000 == 0:
-        logger.info(idx)
-      pairs = set()
-      for noteRaters in tweetNoteRaters:
-        noteRaters = sorted(noteRaters)
-        for i in range(len(noteRaters)):
-          for j in range(i + 1, len(noteRaters)):
-            pair = (noteRaters[i], noteRaters[j])
-            assert pair[0] < pair[1]
-            if pair in pairs:
-              continue
-            pairs.add(pair)
-            if pair not in raterPairCounts:
-              raterPairCounts[pair] = 0
-            raterPairCounts[pair] += 1
-    # Return dataframes
-    left, right, count = zip(
-      *[
-        (leftRater, rightRater, count)
-        for ((leftRater, rightRater), count) in raterPairCounts.items()
-        if count >= minAlignedRatings
-      ]
-    )
-    counts = pd.DataFrame({"left": left, "right": right, "count": count})
-    ratings = ratings.merge(pd.DataFrame({c.raterParticipantIdKey: list(set(left + right))}))
+    del out_left, out_right, out_tweets
+    gc.collect()
+
+    compound.sort()
+
+    # Dedup per tweet
+    dup_mask = np.empty(len(compound), dtype=np.bool_)
+    dup_mask[0] = True
+    dup_mask[1:] = compound[1:] != compound[:-1]
+    compound = compound[dup_mask]
+    del dup_mask
+    gc.collect()
+
+    # Count per pair via run-length encoding
+    pair_key = compound >> tweet_bits
+    pair_boundary = np.empty(len(pair_key), dtype=np.bool_)
+    pair_boundary[0] = True
+    pair_boundary[1:] = pair_key[1:] != pair_key[:-1]
+    pair_starts = np.where(pair_boundary)[0]
+    pair_counts_arr = np.diff(np.append(pair_starts, len(pair_key)))
+    del pair_key, pair_boundary
+    gc.collect()
+
+    # Filter by minAlignedRatings and extract rater codes
+    count_mask = pair_counts_arr >= minAlignedRatings
+    surviving = compound[pair_starts[count_mask]]
+    surviving_counts = pair_counts_arr[count_mask]
+    del compound, pair_starts, pair_counts_arr, count_mask
+    gc.collect()
+
+    rater_mask = (1 << rater_bits) - 1
+    result_left_codes = ((surviving >> left_shift) & rater_mask).astype(np.int32)
+    result_right_codes = ((surviving >> right_shift) & rater_mask).astype(np.int32)
+
+    # Map back to original rater IDs
+    result_left = rater_uniques[result_left_codes]
+    result_right = rater_uniques[result_right_codes]
+
+    counts = pd.DataFrame({
+      "left": result_left,
+      "right": result_right,
+      "count": surviving_counts.astype(int),
+    })
+
+    # Filter ratings to raters that appear in the pair counts
+    included_raters = set(result_left) | set(result_right)
+    ratings = ratings[ratings[c.raterParticipantIdKey].isin(included_raters)]
     logger.info(f"ratings after filter to raters included in pair counts: {len(ratings)}")
     return counts, ratings
 
@@ -270,6 +374,6 @@ class QuasiCliqueDetection:
     return pd.DataFrame(
       {
         c.raterParticipantIdKey: raterIds,
-        c.quasiCliqueValueKey: cliqueIds,
+        c.quasiCliqueValueKey: pd.array(cliqueIds, dtype=pd.Int64Dtype()),
       }
     )
