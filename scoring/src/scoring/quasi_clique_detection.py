@@ -251,27 +251,30 @@ class QuasiCliqueDetection:
     tweet_codes = tweet_codes.astype(np.int32)
     n_tweets = len(tweet_uniques)
 
-    # Build compound action key from (tweet, note, helpfulNum) and factorize
+    # Build compound action key from (tweet, note, helpfulNum) using bit-packing and factorize
     note_codes, _ = pd.factorize(note_col)
     helpful_codes, _ = pd.factorize(helpful_col)
-    n_notes = max(int(note_codes.max()) + 1, 1) if len(note_codes) > 0 else 1
-    n_helpful = max(int(helpful_codes.max()) + 1, 1) if len(helpful_codes) > 0 else 1
+    n_notes_val = max(int(note_codes.max()) + 1, 2) if len(note_codes) > 0 else 2
+    n_helpful_val = max(int(helpful_codes.max()) + 1, 2) if len(helpful_codes) > 0 else 2
+    note_bits = max(1, int(np.ceil(np.log2(n_notes_val))))
+    helpful_bits = max(1, int(np.ceil(np.log2(n_helpful_val))))
 
     action_compound = (
-      tweet_codes.astype(np.int64) * (n_notes * n_helpful)
-      + note_codes.astype(np.int64) * n_helpful
-      + helpful_codes.astype(np.int64)
+      (tweet_codes.astype(np.int64) << (note_bits + helpful_bits))
+      | (note_codes.astype(np.int64) << helpful_bits)
+      | helpful_codes.astype(np.int64)
     )
     action_codes, action_compound_uniques = pd.factorize(action_compound)
     action_codes = action_codes.astype(np.int32)
     n_actions = len(action_compound_uniques)
 
     # Map each action code back to its tweet code
-    tweet_of_action = (action_compound_uniques // (n_notes * n_helpful)).astype(np.int32)
+    tweet_of_action = (action_compound_uniques >> (note_bits + helpful_bits)).astype(np.int32)
     del action_compound, action_compound_uniques, note_codes, helpful_codes
 
     # Deduplicate (rater, action) pairs (safety; should already be unique after preprocessing)
-    pair_key = rater_codes.astype(np.int64) * n_actions + action_codes
+    action_bits = max(1, int(np.ceil(np.log2(max(n_actions, 2)))))
+    pair_key = (rater_codes.astype(np.int64) << action_bits) | action_codes.astype(np.int64)
     _, uniq_idx = np.unique(pair_key, return_index=True)
     rater_codes = rater_codes[uniq_idx]
     action_codes = action_codes[uniq_idx]
@@ -398,9 +401,10 @@ class QuasiCliqueDetection:
         break
 
       # Deduplicate (rater, tweet) pairs and count unique tweets per candidate rater
-      compound = cand_r.astype(np.int64) * n_tweets + cand_t
+      tweet_bits = max(1, int(np.ceil(np.log2(max(n_tweets, 2)))))
+      compound = (cand_r.astype(np.int64) << tweet_bits) | cand_t.astype(np.int64)
       compound = np.unique(compound)
-      r_of_compound = (compound // n_tweets).astype(np.int32)
+      r_of_compound = (compound >> tweet_bits).astype(np.int32)
       scores = np.bincount(r_of_compound, minlength=n_raters)
       scores[included] = -1
       candidate = int(np.argmax(scores))
