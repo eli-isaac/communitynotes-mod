@@ -10,3 +10,13 @@ __pycache__
 .vscode*
 communitynotes_env
 public_venv
+
+# Parquet caches (generated alongside TSV files)
+*.parquet
+
+# Dev cache directories (--cache-dir flag)
+.cache*
+scoring/.cache*
+
+# Per-run log files
+scoring/logs/

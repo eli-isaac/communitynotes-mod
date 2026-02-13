@@ -268,3 +268,61 @@ Same Numba + array + compound-key approach as PSS entry #8:
 | Total `_get_pair_counts` | ~27s | ~4s |
 | Total quasi-clique step | 40s | 16s |
 | Output pair counts | 4,643 | 4,643 (identical) |
+
+---
+
+## 10. Rewrite `_build_clusters` / `_grow_clique` — eliminate pandas from inner loop
+
+**Date:** 2026-02-12 | **Before:** ~308 min (21% sample) | **After:** ~5 min (21% sample)
+
+The `_build_clusters` method repeatedly calls `_grow_clique` to greedily grow quasi-cliques one rater at a time. Each `_grow_clique` call iterates up to `maxCliqueSize` (2000) times, and each iteration performed multiple full DataFrame merges, `value_counts()`, `isin()` filters, and `drop_duplicates()` calls against the entire `raterPairRatings` DataFrame. At scale this meant hundreds of full pandas passes over millions of rows per clique.
+
+### What the original did
+
+Each iteration of the inner loop:
+1. Filtered `raterPairRatings` with `.isin(includedRaters)` — full DataFrame scan per iteration.
+2. Computed `value_counts()` on `(tweetId, noteId, helpfulNum)` to find group actions — sort-based, O(N).
+3. Merged ALL `raterPairRatings` with qualifying actions to find aligned non-included raters — full inner join, O(N).
+4. Ran `drop_duplicates()` + `value_counts()` to count unique tweets per candidate — another O(N) pass.
+5. Repeated steps 1–4 for the trial-add check (with candidate included).
+6. Performed a second merge + `drop_duplicates()` + `value_counts()` to check per-rater inclusion thresholds.
+
+Total: **~6 full DataFrame passes per iteration**, hundreds of iterations per clique, multiple cliques.
+
+### What the new version does
+
+A new `_prepare_grow_clique_arrays` method is called **once** before the clique-building loop. It converts the entire `raterPairRatings` DataFrame into numpy arrays and CSR (Compressed Sparse Row) inverted indices:
+
+**One-time setup (`_prepare_grow_clique_arrays`):**
+1. Factorize all IDs (rater, tweet, note, helpfulNum) to contiguous int32 codes.
+2. Bit-pack `(tweet, note, helpfulNum)` triples into compound int64 action codes, then re-factorize to contiguous int32 action codes.
+3. Build **rater → actions** CSR index (`rat_act_indptr` + `rat_act_data`) — O(1) lookup of any rater's actions.
+4. Build **action → raters** CSR index (`act_rat_indptr` + `act_rat_data`) — O(1) lookup of which raters share an action.
+5. Build `tweet_of_action` mapping and `rater_id_to_code` reverse lookup dict.
+
+**Per-iteration of `_grow_clique` (all numpy, no pandas):**
+1. **Qualifying actions**: `action_count >= threshold` — single vectorized comparison on a pre-allocated int32 array. Action counts are maintained **incrementally**: when a rater is added, only their actions are incremented (`action_count[rater_actions] += 1`), O(k) where k = that rater's number of actions.
+2. **Candidate selection**: gather all `(rater, tweet)` pairs from qualifying actions via the action→raters CSR index, filter to non-included raters, deduplicate with bit-packed compound key + `np.unique`, count unique tweets per rater with `np.bincount`, pick `argmax`.
+3. **Trial-add**: temporarily increment the candidate's action counts, recompute qualifying actions with updated thresholds, check `satisfiedTweets` and per-rater inclusion thresholds via CSR lookups. Rollback on rejection (`action_count[cand_actions] -= 1`).
+
+### Per-iteration cost comparison
+
+| Operation | Original | New |
+|---|---|---|
+| Find qualifying actions | `value_counts()` on full DF — O(N) | `action_count >= threshold` — vectorized O(n_actions) |
+| Find best candidate | `merge()` + `drop_duplicates()` + `value_counts()` — O(N) | CSR gather + `np.unique` + `np.bincount` — O(qualifying pairs) |
+| Trial-add threshold check | second `merge()` + `value_counts()` — O(N) | per-rater boolean index on CSR arrays — O(n_included × k) |
+| Action count update | full recompute from scratch — O(N) | `action_count[cand_actions] += 1` — O(k) |
+
+Where N = total rows in `raterPairRatings` (millions) and k = one rater's actions (hundreds).
+
+### Results (21% sample)
+
+| | Original | New |
+|---|---|---|
+| Compute Quasi-Cliques | 308 min | 5 min |
+| **Speedup** | | **~63x** |
+
+### Note on tie-breaking
+
+Candidate selection tie-breaking differs between the two implementations: the original uses pandas `value_counts()` hash-table ordering, while the new version uses `np.argmax` (lowest rater code among ties). Since the algorithm is a greedy heuristic, different tie-breaking produces slightly different (but equally valid) clique assignments — ~3% difference in total rater assignments at 21% sample. All cliques satisfy the same density constraints.

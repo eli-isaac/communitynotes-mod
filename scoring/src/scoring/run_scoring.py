@@ -1178,26 +1178,22 @@ def _validate_contributor_scoring_output(
 
 
 def run_rater_clustering(notes: pd.DataFrame, ratings: pd.DataFrame) -> pd.DataFrame:
-  cached = dev_cache.load("pss_complete")
-  if cached is not None:
-    postSelectionSimilarityValues = cached["postSelectionSimilarityValues"]
-    logger.info("Restored postSelectionSimilarityValues from cache — skipping to Quasi-Cliques")
-  else:
-    with c.time_block("Compute Post Selection Similarity"):
-      pss = PostSelectionSimilarity(notes, ratings)
-      postSelectionSimilarityValues = pss.get_post_selection_similarity_values()
-      del pss
-      gc.collect()
-    dev_cache.save("pss_complete", {
-      "postSelectionSimilarityValues": postSelectionSimilarityValues,
-    })
+  with c.time_block("Compute Post Selection Similarity"):
+    pss = PostSelectionSimilarity(notes, ratings)
+    postSelectionSimilarityValues = pss.get_post_selection_similarity_values()
+    del pss
+    gc.collect()
   with c.time_block("Compute Quasi-Cliques"):
     qcd = QuasiCliqueDetection()
     quasiCliques = qcd.get_quasi_cliques(notes, ratings)
     del qcd
     gc.collect()
   # Return combined dataframe
-  return postSelectionSimilarityValues.merge(quasiCliques, how="outer")
+  logger.info(f"postSelectionSimilarityValues: {len(postSelectionSimilarityValues)}")
+  logger.info(f"quasiCliques: {len(quasiCliques)}")
+  result = postSelectionSimilarityValues.merge(quasiCliques, how="outer")
+  logger.info(f"result: {len(result)}")
+  return result
 
 
 def run_prescoring(
@@ -2085,7 +2081,15 @@ def run_scoring(
     filterPrescoringInputToSimulateDelayInHours,
   )
 
-  postSelectionSimilarityValues = run_rater_clustering(notes=notes, ratings=ratings)
+  cached = dev_cache.load("rater_clustering_complete")
+  if cached is not None:
+    postSelectionSimilarityValues = cached["postSelectionSimilarityValues"]
+    logger.info("Restored postSelectionSimilarityValues from cache — skipping to run_prescoring")
+  else:
+    postSelectionSimilarityValues = run_rater_clustering(notes=notes, ratings=ratings)
+    dev_cache.save("rater_clustering_complete", {
+      "postSelectionSimilarityValues": postSelectionSimilarityValues,
+    })
 
   (
     prescoringNoteModelOutput,

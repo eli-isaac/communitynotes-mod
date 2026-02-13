@@ -82,7 +82,12 @@ class QuasiCliqueDetection:
     cutoff: int,
     minAlignedRatings: int = 5,
   ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Return counts of how many times raters rate notes in the same way, and all ratings for raters who do so >5 times."""
+    """Computes counts of how many times raters rate notes in the same way, and all ratings for raters who do so >5 times.
+    
+    Returns:
+      - counts: DataFrame with columns "left", "right", "count"
+      - ratings: DataFrame with ratings for raters who do so >5 times
+    """
     # Identify ratings that are in scope
     logger.info(f"initial rating length: {len(ratings)}")
 
@@ -224,88 +229,234 @@ class QuasiCliqueDetection:
     logger.info(f"ratings after filter to raters included in pair counts: {len(ratings)}")
     return counts, ratings
 
+  def _prepare_grow_clique_arrays(self, raterRatings: pd.DataFrame) -> dict:
+    """Convert raterRatings DataFrame to numpy arrays and CSR inverted indices.
+
+    Called once before the clique-building loop. The returned arrays are reused
+    across all _grow_clique calls, eliminating all pandas operations from the
+    inner loop.
+
+    Builds:
+      - Factorized int32 codes for raters, actions (tweet+note+helpful triples), and tweets
+      - CSR-style rater->actions and action->raters inverted indices
+      - Action-to-tweet mapping for fast unique-tweet counting
+      - Reverse lookup dict from original rater IDs to integer codes
+    """
+    rater_col = raterRatings[c.raterParticipantIdKey].values
+    tweet_col = raterRatings[c.tweetIdKey].values
+    note_col = raterRatings[c.noteIdKey].values
+    helpful_col = raterRatings[c.helpfulNumKey].values
+
+    # Factorize rater and tweet IDs to contiguous int32 codes
+    rater_codes, rater_uniques = pd.factorize(rater_col)
+    rater_codes = rater_codes.astype(np.int32)
+    n_raters = len(rater_uniques)
+
+    tweet_codes, tweet_uniques = pd.factorize(tweet_col)
+    tweet_codes = tweet_codes.astype(np.int32)
+    n_tweets = len(tweet_uniques)
+
+    # Build compound action key from (tweet, note, helpfulNum) using bit-packing and factorize
+    note_codes, _ = pd.factorize(note_col)
+    helpful_codes, _ = pd.factorize(helpful_col)
+    n_notes_val = max(int(note_codes.max()) + 1, 2) if len(note_codes) > 0 else 2
+    n_helpful_val = max(int(helpful_codes.max()) + 1, 2) if len(helpful_codes) > 0 else 2
+    note_bits = max(1, int(np.ceil(np.log2(n_notes_val))))
+    helpful_bits = max(1, int(np.ceil(np.log2(n_helpful_val))))
+
+    action_compound = (
+      (tweet_codes.astype(np.int64) << (note_bits + helpful_bits))
+      | (note_codes.astype(np.int64) << helpful_bits)
+      | helpful_codes.astype(np.int64)
+    )
+    action_codes, action_compound_uniques = pd.factorize(action_compound)
+    action_codes = action_codes.astype(np.int32)
+    n_actions = len(action_compound_uniques)
+
+    # Map each action code back to its tweet code
+    tweet_of_action = (action_compound_uniques >> (note_bits + helpful_bits)).astype(np.int32)
+    del action_compound, action_compound_uniques, note_codes, helpful_codes
+
+    # Deduplicate (rater, action) pairs (safety; should already be unique after preprocessing)
+    action_bits = max(1, int(np.ceil(np.log2(max(n_actions, 2)))))
+    pair_key = (rater_codes.astype(np.int64) << action_bits) | action_codes.astype(np.int64)
+    _, uniq_idx = np.unique(pair_key, return_index=True)
+    rater_codes = rater_codes[uniq_idx]
+    action_codes = action_codes[uniq_idx]
+    del pair_key, uniq_idx
+
+    # Build rater -> actions CSR index
+    sort_r = np.argsort(rater_codes, kind='mergesort')
+    rat_act_data = action_codes[sort_r].copy()
+    rat_counts = np.bincount(rater_codes, minlength=n_raters)
+    rat_act_indptr = np.empty(n_raters + 1, dtype=np.int64)
+    rat_act_indptr[0] = 0
+    np.cumsum(rat_counts, out=rat_act_indptr[1:])
+    del sort_r, rat_counts
+
+    # Build action -> raters CSR index
+    sort_a = np.argsort(action_codes, kind='mergesort')
+    act_rat_data = rater_codes[sort_a].copy()
+    act_counts = np.bincount(action_codes, minlength=n_actions)
+    act_rat_indptr = np.empty(n_actions + 1, dtype=np.int64)
+    act_rat_indptr[0] = 0
+    np.cumsum(act_counts, out=act_rat_indptr[1:])
+    del sort_a, act_counts, rater_codes, action_codes
+
+    rater_id_to_code = {rid: i for i, rid in enumerate(rater_uniques)}
+
+    logger.info(
+      f"Prepared grow-clique arrays: {n_raters:,} raters, {n_actions:,} actions, "
+      f"{n_tweets:,} tweets, {len(rat_act_data):,} unique (rater,action) pairs"
+    )
+    return {
+      'n_raters': n_raters,
+      'n_actions': n_actions,
+      'n_tweets': n_tweets,
+      'rater_uniques': rater_uniques,
+      'tweet_uniques': tweet_uniques,
+      'tweet_of_action': tweet_of_action,
+      'rat_act_data': rat_act_data,
+      'rat_act_indptr': rat_act_indptr,
+      'act_rat_data': act_rat_data,
+      'act_rat_indptr': act_rat_indptr,
+      'rater_id_to_code': rater_id_to_code,
+    }
+
   def _grow_clique(
     self,
-    includedRaters: Set[str],
-    raterRatings: pd.DataFrame,
+    seedCodes: Set[int],
+    arrays: dict,
   ):
-    """Grow a clique from an initial set of raters.  Return all included raters and tweets.
+    """Grow a clique from seed rater codes using pre-built numpy arrays.
 
-    Given a clique seed containing two raters, greedily grow the clique one rater at a time
-    by adding the excluded rater that has the most ratings in common with the actions of the
-    clique.  Before each addition, verify that adding the rater will not violate the minimum
-    density requirements of the clique.
+    Equivalent to the original pandas-based _grow_clique but operates entirely on
+    integer-coded numpy arrays and CSR inverted indices.  Action counts are maintained
+    incrementally — O(k) per rater added (k = rater's actions) — instead of recomputing
+    value_counts over the full DataFrame each iteration.
 
     Args:
-      includedRaters: Set of raters to use to initialize a clique
-      raterRatings: DF containing ratings from all raters with 5 or more rating collisions
+      seedCodes: Set of integer rater codes to seed the clique
+      arrays: Dict of pre-built arrays from _prepare_grow_clique_arrays
 
     Returns:
-      Set of raters and tweets that meet density criteria.
+      (set of original rater IDs, set of original tweet IDs) meeting density criteria.
     """
-    # Expand cliques 1 rater at a time, checking to see if density thresholds are satisifed after expansion
+    n_raters = arrays['n_raters']
+    n_actions = arrays['n_actions']
+    n_tweets = arrays['n_tweets']
+    tweet_of_action = arrays['tweet_of_action']
+    rat_act_data = arrays['rat_act_data']
+    rat_act_indptr = arrays['rat_act_indptr']
+    act_rat_data = arrays['act_rat_data']
+    act_rat_indptr = arrays['act_rat_indptr']
+    rater_uniques = arrays['rater_uniques']
+    tweet_uniques = arrays['tweet_uniques']
+
+    # --- Initialize state ---
+    included = np.zeros(n_raters, dtype=np.bool_)
+    for r in seedCodes:
+      included[r] = True
+    n_included = len(seedCodes)
+
+    # Incremental per-action count of how many included raters have each action
+    action_count = np.zeros(n_actions, dtype=np.int32)
+    for r in seedCodes:
+      s, e = rat_act_indptr[r], rat_act_indptr[r + 1]
+      action_count[rat_act_data[s:e]] += 1
+
+    saved_tweet_codes = np.empty(0, dtype=np.int32)
+
     for _ in range(self._maxCliqueSize):
-      # Identify the ratings where there is enough agreement that the rating constitutes a group action
-      ratings = raterRatings[raterRatings[c.raterParticipantIdKey].isin(includedRaters)]
-      groupRatingCounts = (
-        ratings[[c.tweetIdKey, c.noteIdKey, c.helpfulNumKey]].value_counts().reset_index(drop=False)
+      # --- Step 1: Find qualifying actions (both thresholds must be met) ---
+      is_qualifying = (
+        (action_count >= n_included * self._noteInclusionThreshold)
+        & (action_count >= min(n_included, self._minInclusionRatings))
       )
-      groupRatingCounts = groupRatingCounts[
-        groupRatingCounts["count"] >= (len(includedRaters) * self._noteInclusionThreshold)
-      ]
-      groupRatingCounts = groupRatingCounts[
-        groupRatingCounts["count"] >= min(len(includedRaters), self._minInclusionRatings)
-      ]
-      # Find the rater not in the group that most aligned with the group rating events
-      alignedRatings = raterRatings.merge(
-        groupRatingCounts[[c.tweetIdKey, c.noteIdKey, c.helpfulNumKey]]
+      qual_actions = np.where(is_qualifying)[0]
+      if len(qual_actions) == 0:
+        break
+
+      # --- Step 2: Find best candidate (non-included rater with most aligned unique tweets) ---
+      # Gather all (rater, tweet) pairs from qualifying actions via the action->raters CSR index
+      starts = act_rat_indptr[qual_actions]
+      ends = act_rat_indptr[qual_actions + 1]
+      sizes = (ends - starts).astype(np.int64)
+      total_size = int(sizes.sum())
+      if total_size == 0:
+        break
+
+      all_r = np.empty(total_size, dtype=np.int32)
+      all_t = np.empty(total_size, dtype=np.int32)
+      pos = 0
+      for i in range(len(qual_actions)):
+        sz = int(sizes[i])
+        if sz > 0:
+          all_r[pos:pos + sz] = act_rat_data[starts[i]:ends[i]]
+          all_t[pos:pos + sz] = tweet_of_action[qual_actions[i]]
+          pos += sz
+
+      # Filter to non-included raters only
+      mask = ~included[all_r]
+      cand_r = all_r[mask]
+      cand_t = all_t[mask]
+      del all_r, all_t, mask
+
+      if len(cand_r) == 0:
+        break
+
+      # Deduplicate (rater, tweet) pairs and count unique tweets per candidate rater
+      tweet_bits = max(1, int(np.ceil(np.log2(max(n_tweets, 2)))))
+      compound = (cand_r.astype(np.int64) << tweet_bits) | cand_t.astype(np.int64)
+      compound = np.unique(compound)
+      r_of_compound = (compound >> tweet_bits).astype(np.int32)
+      scores = np.bincount(r_of_compound, minlength=n_raters)
+      scores[included] = -1
+      candidate = int(np.argmax(scores))
+      del compound, r_of_compound, scores, cand_r, cand_t
+
+      # --- Step 3: Save current qualifying tweets (before trial add) ---
+      saved_tweet_codes = np.unique(tweet_of_action[qual_actions])
+
+      # --- Step 4: Trial-add the candidate ---
+      cand_s, cand_e = rat_act_indptr[candidate], rat_act_indptr[candidate + 1]
+      cand_actions = rat_act_data[cand_s:cand_e]
+      action_count[cand_actions] += 1
+      n_trial = n_included + 1
+
+      # Recompute qualifying actions with updated counts and thresholds
+      is_qual_trial = (
+        (action_count >= n_trial * self._noteInclusionThreshold)
+        & (action_count >= min(n_trial, self._minInclusionRatings))
       )
-      alignedRatings = alignedRatings[~alignedRatings[c.raterParticipantIdKey].isin(includedRaters)]
-      alignedTweetPerRater = (
-        alignedRatings[[c.tweetIdKey, c.raterParticipantIdKey]]
-        .drop_duplicates()[c.raterParticipantIdKey]
-        .value_counts()
-        .reset_index(drop=False)
-      )
-      candidate = (
-        alignedTweetPerRater.sort_values("count", ascending=False)
-        .head(1)[c.raterParticipantIdKey]
-        .item()
-      )
-      # Preserve current set of tweets incase we decide not to add the candidate
-      includedTweets = set(groupRatingCounts[c.tweetIdKey].drop_duplicates())
-      # Calculate how many tweets would meet the inclusion threshold if the candidate were added
-      candidateRaters = includedRaters | {candidate}
-      ratings = raterRatings[raterRatings[c.raterParticipantIdKey].isin(candidateRaters)]
-      groupRatingCounts = (
-        ratings[[c.tweetIdKey, c.noteIdKey, c.helpfulNumKey]].value_counts().reset_index(drop=False)
-      )
-      groupRatingCounts = groupRatingCounts[
-        groupRatingCounts["count"] >= (len(candidateRaters) * self._noteInclusionThreshold)
-      ]
-      groupRatingCounts = groupRatingCounts[
-        groupRatingCounts["count"] >= min(len(candidateRaters), self._minInclusionRatings)
-      ]
-      satisfiedTweets = groupRatingCounts[c.tweetIdKey].nunique()
-      # Calculate how many raters would be below the inclusion threshold if we add the candidate
-      matchingRatings = ratings.merge(
-        groupRatingCounts[[c.tweetIdKey, c.noteIdKey, c.helpfulNumKey]]
-      )
-      raterCounts = (
-        matchingRatings[[c.raterParticipantIdKey, c.tweetIdKey]]
-        .drop_duplicates()
-        .value_counts(c.raterParticipantIdKey)
-        .reset_index(drop=False)
-      )
-      ratersBelowThreshold = (
-        raterCounts["count"] < (self._raterInclusionThreshold * satisfiedTweets)
-      ).sum()
-      # Check standards
-      if satisfiedTweets >= self._minCliqueTweets and ratersBelowThreshold == 0:
-        includedRaters = candidateRaters
-      else:
-        return includedRaters, includedTweets
-    return includedRaters, includedTweets
+      qual_trial = np.where(is_qual_trial)[0]
+      trial_tweet_codes = np.unique(tweet_of_action[qual_trial])
+      satisfiedTweets = len(trial_tweet_codes)
+
+      # --- Step 5: Reject if not enough tweets ---
+      if satisfiedTweets < self._minCliqueTweets:
+        action_count[cand_actions] -= 1
+        included_codes = np.where(included)[0]
+        return set(rater_uniques[included_codes]), set(tweet_uniques[saved_tweet_codes])
+
+      # --- Step 6: Reject if any rater falls below the inclusion threshold ---
+      rater_threshold = self._raterInclusionThreshold * satisfiedTweets
+      raters_to_check = np.append(np.where(included)[0], candidate)
+      for r in raters_to_check:
+        r_qual = rat_act_data[rat_act_indptr[r]:rat_act_indptr[r + 1]]
+        r_qual = r_qual[is_qual_trial[r_qual]]
+        if len(r_qual) > 0 and len(np.unique(tweet_of_action[r_qual])) < rater_threshold:
+          action_count[cand_actions] -= 1
+          included_codes = np.where(included)[0]
+          return set(rater_uniques[included_codes]), set(tweet_uniques[saved_tweet_codes])
+
+      # --- Step 7: Accept the candidate ---
+      included[candidate] = True
+      n_included += 1
+
+    # Loop exhausted (max iterations or no qualifying actions/candidates)
+    included_codes = np.where(included)[0]
+    return set(rater_uniques[included_codes]), set(tweet_uniques[saved_tweet_codes])
 
   def _build_clusters(
     self,
@@ -318,6 +469,9 @@ class QuasiCliqueDetection:
       raterPairCounts: DF containing counts of how often pairs of raters colide.
       raterPairRatings: All ratings from raters with >5 collisions with another rater
     """
+    # Pre-build numpy arrays and inverted indices once for all grow_clique calls
+    arrays = self._prepare_grow_clique_arrays(raterPairRatings)
+
     cliques = []
     # Attempt to cluster every rater with at least minRaterPairCount collisions
     logger.info(f"orig raterPairCounts: {len(raterPairCounts)}")
@@ -326,10 +480,15 @@ class QuasiCliqueDetection:
     # Build cliques
     while len(raterPairCounts) > 0:
       # Identify seed
+      logger.info(f"sorting raterPairCounts")
       raterPairCounts = raterPairCounts.sort_values("count", ascending=False)
       leftRater, rightRater = raterPairCounts.head(1)[["left", "right"]].values.flatten()
-      # Build clique and prune candidate set
-      cliqueRaters, cliquePosts = self._grow_clique({leftRater, rightRater}, raterPairRatings)
+      # Convert seed rater IDs to integer codes and grow clique
+      leftCode = arrays['rater_id_to_code'][leftRater]
+      rightCode = arrays['rater_id_to_code'][rightRater]
+      logger.info(f"growing clique with")
+      cliqueRaters, cliquePosts = self._grow_clique({leftCode, rightCode}, arrays)
+      logger.info(f"pruning raterPairCounts {len(raterPairCounts)}")
       raterPairCounts = raterPairCounts[
         ~(
           (raterPairCounts["left"].isin(cliqueRaters))
@@ -374,6 +533,6 @@ class QuasiCliqueDetection:
     return pd.DataFrame(
       {
         c.raterParticipantIdKey: raterIds,
-        c.quasiCliqueValueKey: cliqueIds,
+        c.quasiCliqueValueKey: pd.array(cliqueIds, dtype=pd.Int64Dtype()),
       }
     )
