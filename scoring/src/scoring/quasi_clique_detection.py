@@ -433,28 +433,26 @@ class QuasiCliqueDetection:
       trial_tweet_codes = np.unique(tweet_of_action[qual_trial])
       satisfiedTweets = len(trial_tweet_codes)
 
-      # --- Step 5: Check rater inclusion thresholds ---
+      # --- Step 5: Reject if not enough tweets ---
+      if satisfiedTweets < self._minCliqueTweets:
+        action_count[cand_actions] -= 1
+        included_codes = np.where(included)[0]
+        return set(rater_uniques[included_codes]), set(tweet_uniques[saved_tweet_codes])
+
+      # --- Step 6: Reject if any rater falls below the inclusion threshold ---
       rater_threshold = self._raterInclusionThreshold * satisfiedTweets
-      ratersBelowThreshold = 0
       raters_to_check = np.append(np.where(included)[0], candidate)
       for r in raters_to_check:
-        r_s, r_e = rat_act_indptr[r], rat_act_indptr[r + 1]
-        r_actions = rat_act_data[r_s:r_e]
-        r_qual = r_actions[is_qual_trial[r_actions]]
-        if len(r_qual) == 0:
-          continue  # Matches original merge behavior: absent raters not counted
-        r_unique_tweets = len(np.unique(tweet_of_action[r_qual]))
-        if r_unique_tweets < rater_threshold:
-          ratersBelowThreshold += 1
+        r_qual = rat_act_data[rat_act_indptr[r]:rat_act_indptr[r + 1]]
+        r_qual = r_qual[is_qual_trial[r_qual]]
+        if len(r_qual) > 0 and len(np.unique(tweet_of_action[r_qual])) < rater_threshold:
+          action_count[cand_actions] -= 1
+          included_codes = np.where(included)[0]
+          return set(rater_uniques[included_codes]), set(tweet_uniques[saved_tweet_codes])
 
-      # --- Step 6: Accept or reject the candidate ---
-      if satisfiedTweets >= self._minCliqueTweets and ratersBelowThreshold == 0:
-        included[candidate] = True
-        n_included += 1
-      else:
-        # Rollback action counts and return current state
-        action_count[cand_actions] -= 1
-        return set(rater_uniques[np.where(included)[0]]), set(tweet_uniques[saved_tweet_codes])
+      # --- Step 7: Accept the candidate ---
+      included[candidate] = True
+      n_included += 1
 
     # Loop exhausted (max iterations or no qualifying actions/candidates)
     included_codes = np.where(included)[0]
