@@ -83,17 +83,27 @@ class TopicModel(object):
     """Initialize a list of seed terms for each topic."""
     self._seedTerms = seedTerms
     self._unassignedThreshold = unassignedThreshold
+    self._compiled_regex = self._compile_regex()
+
+  def _compile_regex(self):
+    """Compile a single regex from all seed terms grouped by topic."""
+    regex_patterns = {}
+    for topic, patterns in self._seedTerms.items():
+      mod_patterns = []
+      for pattern in patterns:
+        # If the pattern contains an escaped period (i.e. it's a URL), don't enforce the preceding whitespace or start-of-string.
+        if "\\." in pattern:
+          mod_patterns.append(pattern)
+        else:
+          mod_patterns.append(f"(\s|^){pattern}")
+      group_name = f"{topic.name}"
+      regex_patterns[group_name] = f"(?P<{group_name}>{'|'.join(mod_patterns)})"
+    # Combine all groups into a single regex
+    full_regex = "|".join(regex_patterns.values())
+    return re.compile(full_regex)
 
   def _make_seed_labels(self, texts: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Produce a label vector based on seed terms.
-
-    Eliminates regex entirely by converting all seed patterns to plain string
-    searches using Python's ``in`` operator (C-level Boyer-Moore).
-
-    Texts are lowercased, whitespace-normalized to spaces, and prepended with
-    a space so that searching for ``" term"`` handles both the ``(\\s|^)``
-    boundary conditions in one plain string check.  Patterns containing ``\\.``
-    (URLs) are searched without a boundary prefix.
 
     Args:
       texts: array containing strings for topic assignment
@@ -102,51 +112,20 @@ class TopicModel(object):
       Tuple[0]: array specifying topic labels for texts
       Tuple[1]: array specifying texts that are unassigned due to conflicting matches.
     """
-    n = len(texts)
-    labels = np.zeros(n, dtype=np.int64)
-    conflictedTexts = np.zeros(n, dtype=bool)
-    if n == 0:
-      return labels, conflictedTexts
+    labels = np.zeros(texts.shape[0], dtype=np.int64)
+    conflictedTexts = np.zeros(texts.shape[0], dtype=bool)
 
-    # Normalize: lowercase, replace all whitespace with spaces, prepend a space.
-    # The prepended space lets us use " term" as a search pattern to handle both
-    # (\s|^) boundary conditions (term after whitespace, or term at start of text).
-    _WS_TRANS = str.maketrans("\t\n\r\x0b\x0c", "     ")
-    texts_norm = pd.Series([
-      " " + t.lower().translate(_WS_TRANS) if isinstance(t, str) else " "
-      for t in texts
-    ])
+    for i, text in enumerate(texts):
+      matches = self._compiled_regex.finditer(text.lower())
+      found_topics = set()
+      for match in matches:
+        found_topics.update([Topics[grp].value for grp in match.groupdict() if match.group(grp)])
 
-    # Convert each seed term to a plain search string:
-    # - Patterns with \.: strip the escapes (e.g. help\.x\.com -> help.x.com), no boundary
-    # - All others: replace \s with space, prepend " " for boundary
-    topic_masks = []
-    topic_values = []
-    for topic, patterns in self._seedTerms.items():
-      topic_mask = np.zeros(n, dtype=bool)
-      for pattern in patterns:
-        if "\\." in pattern:
-          search_term = pattern.replace("\\.", ".")
-        else:
-          search_term = " " + pattern.replace("\\s", " ")
-        topic_mask |= texts_norm.str.contains(search_term, regex=False, na=False).values
-      topic_masks.append(topic_mask)
-      topic_values.append(topic.value)
-
-    # Stack into (n_texts x n_topics) matrix and count matches per text
-    match_matrix = np.column_stack(topic_masks)
-    topic_values_arr = np.array(topic_values, dtype=np.int64)
-    match_count = match_matrix.sum(axis=1)
-
-    # Single-topic match: assign that topic
-    single = match_count == 1
-    if single.any():
-      labels[single] = topic_values_arr[np.argmax(match_matrix[single], axis=1)]
-
-    # Multi-topic match: conflicted
-    multi = match_count > 1
-    labels[multi] = Topics.Unassigned.value
-    conflictedTexts[multi] = True
+      if len(found_topics) == 1:
+        labels[i] = found_topics.pop()
+      elif len(found_topics) > 1:
+        labels[i] = Topics.Unassigned.value
+        conflictedTexts[i] = True
 
     unassigned_count = np.sum(conflictedTexts)
     logger.info(f"  Notes unassigned due to multiple matches: {unassigned_count}")

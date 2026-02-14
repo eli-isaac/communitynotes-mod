@@ -326,3 +326,35 @@ Where N = total rows in `raterPairRatings` (millions) and k = one rater's action
 ### Note on tie-breaking
 
 Candidate selection tie-breaking differs between the two implementations: the original uses pandas `value_counts()` hash-table ordering, while the new version uses `np.argmax` (lowest rater code among ties). Since the algorithm is a greedy heuristic, different tie-breaking produces slightly different (but equally valid) clique assignments — ~3% difference in total rater assignments at 21% sample. All cliques satisfy the same density constraints.
+
+---
+
+## 11. Rewrite `_make_seed_labels` — eliminate regex with plain string search
+
+**Date:** 2026-02-12 | **Before:** ~8 min (full scale) | **After:** ~45s (full scale)
+
+The `_make_seed_labels` method in `TopicModel` assigns topic labels to notes by matching seed terms against note text. At full scale (~500K+ texts), the original implementation took ~8 minutes.
+
+### What the original did
+
+A single combined regex with named groups (one per topic) was compiled from all ~20 seed terms. For every text, `finditer()` was called to find all matches, then a Python `set()` collected which named groups fired, with `Topics[grp].value` lookups for each match. This meant ~500K Python iterations, each creating regex Match objects, dicts (`groupdict()`), sets, and doing enum lookups.
+
+### What the new version does
+
+Eliminates regex entirely by converting all seed patterns to plain string searches using Python's `in` operator (C-level Boyer-Moore):
+
+1. **Whitespace normalization**: `str.translate()` replaces all whitespace characters with spaces in a single C-level pass per text.
+2. **Prepend-space trick**: a space is prepended to each text so that searching for `" term"` handles both `\s` (whitespace before term) and `^` (term at start of string) boundary conditions in one plain check.
+3. **Pattern conversion**:
+   - Simple patterns like `"ukrain"` → search for `" ukrain"`
+   - Patterns with `\s` like `"\shamas\s"` → replace `\s` with space → search for `"  hamas "` (preserves original boundary semantics)
+   - URL patterns with `\.` like `"help\.x\.com"` → search for `"help.x.com"` (no boundary prefix)
+4. **Vectorized matching**: `pd.Series.str.contains(term, regex=False)` runs C-level substring search across all texts for each term, with results combined via numpy boolean OR per topic.
+5. **Removed `_compile_regex`**: the compiled regex and its `_compile_regex()` builder method are no longer needed and were removed.
+
+### Results (full scale)
+
+| | Original | New |
+|---|---|---|
+| `_make_seed_labels` | ~8 min | ~45s |
+| **Speedup** | | **~10x** |
