@@ -239,7 +239,7 @@ class PostSelectionSimilarity:
     cliquesDf[c.postSelectionValueKey] = cliquesDf[c.postSelectionValueKey].astype(pd.Int64Dtype())
     return cliquesDf
 
-
+# this function takes about 8 minutes to run
 def apply_post_selection_similarity(notes, ratings, postSelectionSimilarityValues):
   """
   Filters out ratings after the first on each note from raters who have high post selection similarity,
@@ -247,9 +247,10 @@ def apply_post_selection_similarity(notes, ratings, postSelectionSimilarityValue
   """
   # Summarize input
   logger.info(f"Total ratings prior to applying post selection similarity: {len(ratings)}")
-  logger.info(
-    f"Total unique ratings before: {len(ratings[[c.noteIdKey, c.raterParticipantIdKey]].drop_duplicates())}"
-  )
+  # takes about 55 seconds to run
+  # logger.info(
+  #   f"Total unique ratings before: {len(ratings[[c.noteIdKey, c.raterParticipantIdKey]].drop_duplicates())}"
+  # )
   pssSummary = (
     postSelectionSimilarityValues[[c.postSelectionValueKey, c.quasiCliqueValueKey]] > 0
   ).sum()
@@ -316,9 +317,10 @@ def apply_post_selection_similarity(notes, ratings, postSelectionSimilarityValue
     inplace=True,
   )
   logger.info(f"Total ratings after to applying post selection similarity: {len(ratings)}")
-  logger.info(
-    f"Total unique ratings after: {len(ratings[[c.noteIdKey, c.raterParticipantIdKey]].drop_duplicates())}"
-  )
+  # takes about 55 seconds to run
+  # logger.info(
+  #   f"Total unique ratings after: {len(ratings[[c.noteIdKey, c.raterParticipantIdKey]].drop_duplicates())}"
+  # )
   return ratings
 
 

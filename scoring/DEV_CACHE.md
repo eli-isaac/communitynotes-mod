@@ -29,7 +29,7 @@ python main.py \
   --outdir data \
   --cache-dir .cache
 
-# Second run — cached stages are skipped, jumps straight to Quasi-Cliques:
+# Second run — cached stages are skipped, jumps straight to apply_post_selection_similarity:
 python main.py \
   --notes data/notes-00000.tsv \
   --ratings data/ratings-00000.tsv \
@@ -71,30 +71,25 @@ There are **two cache files**, each covering a different section of the pipeline
 - Previous scored notes loading
 - Rating sampling (`--sample-ratings`)
 
-### 2. `pss_complete.pkl` — Full Post Selection Similarity Output
+### 2. `pre_apply_pss.pkl` — Right Before `apply_post_selection_similarity`
 
-**Saved in:** `run_scoring.py` → `run_rater_clustering()`,
-right *before* `Compute Quasi-Cliques` is called.
+**Saved in:** `run_scoring.py` → `run_prescoring()`,
+right *before* `apply_post_selection_similarity()` is called.
 
 **Contains:**
 
 | Key                            | Type             | Description                                                      |
 |--------------------------------|------------------|------------------------------------------------------------------|
 | `postSelectionSimilarityValues`| `pd.DataFrame`   | Final PSS output (rater → clique mapping)                        |
+| `noteTopics`                   | `pd.DataFrame`   | Note topic assignments from topic model                          |
+| `noteTopicClassifierPipe`      | sklearn Pipeline | Trained topic classifier pipeline                                |
 
 **What it skips on cache hit:**
-- Helpful ratings filtering
-- `compute_affinity_and_coverage()` (~3.5 minutes)
-- `get_suspect_pairs()`
-- `_preprocess_ratings()` (~2.5 minutes)
-- `_get_pair_counts_dict()`
-- PMI/MinSim computation
-- `aggregate_into_cliques()`
-- `get_post_selection_similarity_values()`
+- `run_rater_clustering()` — PSS computation, quasi-clique detection
+- Note topic assignment (topic model training + `get_note_topics()`)
 
 **What still runs (always):**
-- Quasi-Clique detection
-- Everything downstream (prescoring, final scoring, contributor scoring)
+- `apply_post_selection_similarity()` and everything downstream
 
 ---
 
@@ -110,15 +105,16 @@ _run_scorer()
        │
        ├─ filter_input_data_for_testing()          ← always runs (fast)
        │
-       ├─ run_rater_clustering()
-       │    │
-       │    ├─ [CACHE: pss_complete] ── cache hit?  → load from cache, skip PSS
-       │    │                             cache miss? → compute PSS & save
-       │    │
-       │    ├─ PostSelectionSimilarity.__init__()    ← skipped on cache hit
-       │    └─ get_post_selection_similarity_values() ← skipped on cache hit
+       ├─ [CACHE: pre_apply_pss] ── cache hit?  → load, skip run_rater_clustering + topic model
+       │                            cache miss? → run_rater_clustering + topic model, save
        │
-       ├─ run_prescoring()                          ← always runs
+       ├─ run_rater_clustering()                    ← skipped on cache hit
+       │
+       ├─ run_prescoring()
+       │    ├─ Note topic assignment                ← skipped on cache hit
+       │    ├─ apply_post_selection_similarity()    ← always runs
+       │    └─ ... rest of prescoring
+       │
        ├─ run_final_note_scoring()                  ← always runs
        └─ run_contributor_scoring()                 ← always runs
 ```
@@ -149,9 +145,10 @@ All functions are no-ops when caching is disabled (i.e., `--cache-dir` not passe
 ### Modified: `scoring/src/scoring/run_scoring.py`
 
 1. **Import:** Added `from . import dev_cache`.
-2. **`run_rater_clustering()`:** Wrapped the entire Post Selection Similarity
-   computation in a cache check/save. On cache hit, skips straight to
-   Quasi-Clique detection.
+2. **`run_scoring()` / `run_prescoring()`:** Cache checkpoint is right before
+   `apply_post_selection_similarity()`. On cache hit, skips `run_rater_clustering()`
+   and the topic model; loads cached data and runs `apply_post_selection_similarity()`
+   and everything downstream.
 
 ---
 
@@ -168,8 +165,8 @@ Caches are **not** automatically invalidated. You must manually delete them when
 # Delete everything:
 rm -rf .cache
 
-# Delete just the PSS cache (re-run full PSS but keep data loading cache):
-rm .cache/pss_complete.pkl
+# Delete just the pre-apply-PSS cache (re-run rater clustering + topic model but keep data loading cache):
+rm .cache/pre_apply_pss.pkl
 
 # Delete just the data loading cache (re-parse TSVs but keep PSS cache):
 rm .cache/runner_data.pkl
@@ -182,7 +179,7 @@ rm .cache/runner_data.pkl
 Expect the cache files to be large — they contain full DataFrames:
 
 - `runner_data.pkl`: Typically **several GB** (contains all input DataFrames).
-- `pss_complete.pkl`: Typically **small** (just the rater-to-clique mapping DataFrame).
+- `pre_apply_pss.pkl`: Typically **moderate** (rater-to-clique mapping, note topics, topic classifier).
 
 Make sure the cache directory has sufficient disk space, and add it to
 `.gitignore` if it's inside the repo.
