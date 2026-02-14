@@ -83,6 +83,18 @@ class TopicModel(object):
     """Initialize a list of seed terms for each topic."""
     self._seedTerms = seedTerms
     self._unassignedThreshold = unassignedThreshold
+    # Pre-build tokenizer components once (reused per-text by custom_tokenizer)
+    self._preprocessor = CountVectorizer(
+      strip_accents="unicode", lowercase=True
+    ).build_preprocessor()
+    seed_pats = [
+      r"(?:https?://)?(" + term + r")(?:/[^\s]+)?|" for term in get_seed_term_with_periods()
+    ]
+    self._token_pattern = re.compile(r"(?i)" + "".join(seed_pats + [r"\b\w\w+\b"]))
+    # Cache for custom_tokenizer results — the tokenizer is called twice on the same
+    # texts (once in _get_stop_words and once in the pipeline's CountVectorizer.fit),
+    # so the second pass hits the cache and is essentially free.
+    self._tokenizer_cache = {}
 
   def _make_seed_labels(self, texts: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Produce a label vector based on seed terms.
@@ -153,28 +165,23 @@ class TopicModel(object):
     return labels, conflictedTexts
 
   def custom_tokenizer(self, text):
-    # This pattern captures help.x.com or x.com/tos even if preceded by http(s):// and with optional trailing paths,
-    # otherwise falls back to matching words of at least 2 characters.
-    default_preprocessor = CountVectorizer(
-      strip_accents="unicode", lowercase=True
-    ).build_preprocessor()
-    text = default_preprocessor(text)
+    """Tokenize text, capturing seed-term URLs as single tokens.
 
-    seed_patterns = [
-      r"(?:https?://)?(" + term + r")(?:/[^\s]+)?|" for term in get_seed_term_with_periods()
-    ]
-    pattern_string = r"(?i)" + "".join(seed_patterns + [r"\b\w\w+\b"])
-    pattern = re.compile(pattern_string)
+    Uses pre-compiled preprocessor and regex pattern from __init__, and caches
+    results so that the second tokenization pass (pipeline fit after stop-word
+    identification) is essentially free.
+    """
+    cached = self._tokenizer_cache.get(text)
+    if cached is not None:
+      return cached
 
-    # For any match groups (e.g. URLs), return just the group. Else return whole word.
+    processed = self._preprocessor(text)
     tokens = []
-    for match in pattern.finditer(text):
-      # Look for the first non-None seed term group in the match groups.
+    for match in self._token_pattern.finditer(processed):
       seed_term = next((g for g in match.groups() if g is not None), None)
-      if seed_term is not None:
-        tokens.append(seed_term)
-      else:
-        tokens.append(match.group(0))
+      tokens.append(seed_term if seed_term is not None else match.group(0))
+
+    self._tokenizer_cache[text] = tokens
     return tokens
 
   def _get_stop_words(self, texts: np.ndarray) -> List[str]:
@@ -272,7 +279,7 @@ class TopicModel(object):
             ),
           ),
           ("tfidf", TfidfTransformer()),
-          ("Classifier", LogisticRegression(max_iter=1000, verbose=1)),
+          ("Classifier", LogisticRegression(max_iter=1000, verbose=1, n_jobs=-1)),
         ],
         verbose=True,
       )

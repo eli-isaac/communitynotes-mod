@@ -352,9 +352,17 @@ Eliminates regex entirely by converting all seed patterns to plain string search
 4. **Vectorized matching**: `pd.Series.str.contains(term, regex=False)` runs C-level substring search across all texts for each term, with results combined via numpy boolean OR per topic.
 5. **Removed `_compile_regex`**: the compiled regex and its `_compile_regex()` builder method are no longer needed and were removed.
 
+### 11b. Cache `custom_tokenizer` results and pre-compute its components
+
+The `custom_tokenizer` method was recreating a `CountVectorizer` preprocessor and recompiling a regex pattern on every single call (~500K+ calls). Worse, the same texts are tokenized twice: once in `_get_stop_words` (to build the vocabulary) and again in the pipeline's `CountVectorizer.fit()` (to build the document-term matrix).
+
+- **Pre-computed components**: moved the preprocessor and compiled regex pattern into `__init__`, eliminating ~500K redundant object instantiations.
+- **Result cache** (`_tokenizer_cache`): the first tokenization pass (`_get_stop_words`) populates a dict cache. The second pass (`pipe.fit`) is a dict lookup per text instead of regex matching. In the bootstrapped case, all iterations after the first are fully cached as well.
+
 ### Results (full scale)
 
 | | Original | New |
 |---|---|---|
 | `_make_seed_labels` | ~8 min | ~45s |
-| **Speedup** | | **~10x** |
+| `custom_tokenizer` (2nd pass) | ~3 min | ~0s (cached) |
+| **Total speedup** | | **~10x + ~1 min saved on training** |
