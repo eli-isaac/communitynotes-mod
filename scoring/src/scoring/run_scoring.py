@@ -1215,6 +1215,7 @@ def run_prescoring(
   maxWorkers: Optional[int] = None,
   cachedNoteTopics: Optional[pd.DataFrame] = None,
   cachedNoteTopicClassifierPipe: Optional[sklearn.pipeline.Pipeline] = None,
+  cachedRatings: Optional[pd.DataFrame] = None,
 ) -> Tuple[
   pd.DataFrame,
   pd.DataFrame,
@@ -1231,40 +1232,52 @@ def run_prescoring(
     logger.info(get_df_info(ratings, "ratings"))
     logger.info(get_df_info(noteStatusHistory, "noteStatusHistory"))
     logger.info(get_df_info(userEnrollment, "userEnrollment"))
-  if cachedNoteTopics is not None and cachedNoteTopicClassifierPipe is not None:
+  if cachedRatings is not None:
+    # Cache hit: skip topic model and PSS filtering entirely.
+    ratings = cachedRatings
+    assert cachedNoteTopics is not None and cachedNoteTopicClassifierPipe is not None
     noteTopics = cachedNoteTopics
     noteTopicClassifierPipe = cachedNoteTopicClassifierPipe
+    logger.info(
+      f"Using cached post-PSS ratings ({len(ratings)} rows), noteTopics, and noteTopicClassifierPipe."
+    )
   else:
-    with c.time_block("Note Topic Assignment"):
-      topicModel = TopicModel()
-      (
-        noteTopicClassifierPipe,
-        seedLabels,
-        conflictedTexts,
-      ) = topicModel.train_note_topic_classifier(notes)
+    if cachedNoteTopics is not None and cachedNoteTopicClassifierPipe is not None:
+      noteTopics = cachedNoteTopics
+      noteTopicClassifierPipe = cachedNoteTopicClassifierPipe
+    else:
+      with c.time_block("Note Topic Assignment"):
+        topicModel = TopicModel()
+        (
+          noteTopicClassifierPipe,
+          seedLabels,
+          conflictedTexts,
+        ) = topicModel.train_note_topic_classifier(notes)
 
-      noteTopics = topicModel.get_note_topics(
-        notes,
-        [noteTopicClassifierPipe],
-        [seedLabels],
-        conflictedTextSetsForAccuracyEval=[conflictedTexts],
-      )
-    dev_cache.save("pre_apply_pss", {
+        noteTopics = topicModel.get_note_topics(
+          notes,
+          [noteTopicClassifierPipe],
+          [seedLabels],
+          conflictedTextSetsForAccuracyEval=[conflictedTexts],
+        )
+
+    logger.info(
+      f"ratings summary before PSS: {get_df_fingerprint(ratings, [c.noteIdKey, c.raterParticipantIdKey])}"
+    )
+    with c.time_block("Filter ratings by Post Selection Similarity"):
+      logger.info(f"Post Selection Similarity Prescoring: begin with {len(ratings)} ratings.")
+      ratings = apply_post_selection_similarity(notes, ratings, postSelectionSimilarityValues)
+      logger.info(f"Post Selection Similarity Prescoring: {len(ratings)} ratings remaining.")
+    logger.info(
+      f"ratings summary after PSS: {get_df_fingerprint(ratings, [c.noteIdKey, c.raterParticipantIdKey])}"
+    )
+
+    dev_cache.save("pre_get_scorers", {
       "postSelectionSimilarityValues": postSelectionSimilarityValues,
       "noteTopics": noteTopics,
       "noteTopicClassifierPipe": noteTopicClassifierPipe,
+      "ratings": ratings,
     })
-
-  logger.info(
-    f"ratings summary before PSS: {get_df_fingerprint(ratings, [c.noteIdKey, c.raterParticipantIdKey])}"
-  )
-  with c.time_block("Filter ratings by Post Selection Similarity"):
-    logger.info(f"Post Selection Similarity Prescoring: begin with {len(ratings)} ratings.")
-    ratings = apply_post_selection_similarity(notes, ratings, postSelectionSimilarityValues)
-    logger.info(f"Post Selection Similarity Prescoring: {len(ratings)} ratings remaining.")
-  logger.info(
-    f"ratings summary after PSS: {get_df_fingerprint(ratings, [c.noteIdKey, c.raterParticipantIdKey])}"
-  )
 
   scorers = _get_scorers(
     seed=seed,
@@ -2093,18 +2106,20 @@ def run_scoring(
     filterPrescoringInputToSimulateDelayInHours,
   )
 
-  cached = dev_cache.load("pre_apply_pss")
+  cached = dev_cache.load("pre_get_scorers")
   if cached is not None:
     postSelectionSimilarityValues = cached["postSelectionSimilarityValues"]
     cachedNoteTopics = cached["noteTopics"]
     cachedNoteTopicClassifierPipe = cached["noteTopicClassifierPipe"]
+    cachedRatings = cached["ratings"]
     logger.info(
-      "Restored from cache (pre_apply_pss) — skipping run_rater_clustering, jumping to apply_post_selection_similarity"
+      "Restored from cache (pre_get_scorers) — skipping run_rater_clustering + topic model + PSS, jumping to _get_scorers"
     )
   else:
     postSelectionSimilarityValues = run_rater_clustering(notes=notes, ratings=ratings)
     cachedNoteTopics = None
     cachedNoteTopicClassifierPipe = None
+    cachedRatings = None
 
   (
     prescoringNoteModelOutput,
@@ -2129,6 +2144,7 @@ def run_scoring(
     previousRatingCutoffTimestampMillis=previousRatingCutoffTimestampMillis,
     cachedNoteTopics=cachedNoteTopics,
     cachedNoteTopicClassifierPipe=cachedNoteTopicClassifierPipe,
+    cachedRatings=cachedRatings,
   )
 
   logger.info("We invoked run_scoring and are now in between prescoring and scoring.")

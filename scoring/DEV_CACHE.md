@@ -29,7 +29,7 @@ python main.py \
   --outdir data \
   --cache-dir .cache
 
-# Second run — cached stages are skipped, jumps straight to apply_post_selection_similarity:
+# Second run — cached stages are skipped, jumps straight to _get_scorers:
 python main.py \
   --notes data/notes-00000.tsv \
   --ratings data/ratings-00000.tsv \
@@ -71,10 +71,10 @@ There are **two cache files**, each covering a different section of the pipeline
 - Previous scored notes loading
 - Rating sampling (`--sample-ratings`)
 
-### 2. `pre_apply_pss.pkl` — Right Before `apply_post_selection_similarity`
+### 2. `pre_get_scorers.pkl` — Right Before `_get_scorers`
 
 **Saved in:** `run_scoring.py` → `run_prescoring()`,
-right *before* `apply_post_selection_similarity()` is called.
+right *before* `_get_scorers()` is called (after PSS filtering).
 
 **Contains:**
 
@@ -83,13 +83,15 @@ right *before* `apply_post_selection_similarity()` is called.
 | `postSelectionSimilarityValues`| `pd.DataFrame`   | Final PSS output (rater → clique mapping)                        |
 | `noteTopics`                   | `pd.DataFrame`   | Note topic assignments from topic model                          |
 | `noteTopicClassifierPipe`      | sklearn Pipeline | Trained topic classifier pipeline                                |
+| `ratings`                      | `pd.DataFrame`   | Ratings after `apply_post_selection_similarity()` filtering      |
 
 **What it skips on cache hit:**
 - `run_rater_clustering()` — PSS computation, quasi-clique detection
 - Note topic assignment (topic model training + `get_note_topics()`)
+- `apply_post_selection_similarity()` — PSS-based rating filtering
 
 **What still runs (always):**
-- `apply_post_selection_similarity()` and everything downstream
+- `_get_scorers()` and everything downstream
 
 ---
 
@@ -105,14 +107,15 @@ _run_scorer()
        │
        ├─ filter_input_data_for_testing()          ← always runs (fast)
        │
-       ├─ [CACHE: pre_apply_pss] ── cache hit?  → load, skip run_rater_clustering + topic model
-       │                            cache miss? → run_rater_clustering + topic model, save
+       ├─ [CACHE: pre_get_scorers] ─ cache hit?  → load, skip clustering + topics + PSS
+       │                              cache miss? → run all three, save
        │
        ├─ run_rater_clustering()                    ← skipped on cache hit
        │
        ├─ run_prescoring()
        │    ├─ Note topic assignment                ← skipped on cache hit
-       │    ├─ apply_post_selection_similarity()    ← always runs
+       │    ├─ apply_post_selection_similarity()    ← skipped on cache hit
+       │    ├─ _get_scorers()                       ← always runs (resumes here)
        │    └─ ... rest of prescoring
        │
        ├─ run_final_note_scoring()                  ← always runs
@@ -146,9 +149,9 @@ All functions are no-ops when caching is disabled (i.e., `--cache-dir` not passe
 
 1. **Import:** Added `from . import dev_cache`.
 2. **`run_scoring()` / `run_prescoring()`:** Cache checkpoint is right before
-   `apply_post_selection_similarity()`. On cache hit, skips `run_rater_clustering()`
-   and the topic model; loads cached data and runs `apply_post_selection_similarity()`
-   and everything downstream.
+   `_get_scorers()`. On cache hit, skips `run_rater_clustering()`, the topic model,
+   and `apply_post_selection_similarity()`; loads cached data (including post-PSS
+   ratings) and resumes from `_get_scorers()` and everything downstream.
 
 ---
 
@@ -165,8 +168,8 @@ Caches are **not** automatically invalidated. You must manually delete them when
 # Delete everything:
 rm -rf .cache
 
-# Delete just the pre-apply-PSS cache (re-run rater clustering + topic model but keep data loading cache):
-rm .cache/pre_apply_pss.pkl
+# Delete just the pre-get-scorers cache (re-run rater clustering + topic model + PSS but keep data loading cache):
+rm .cache/pre_get_scorers.pkl
 
 # Delete just the data loading cache (re-parse TSVs but keep PSS cache):
 rm .cache/runner_data.pkl
@@ -179,7 +182,7 @@ rm .cache/runner_data.pkl
 Expect the cache files to be large — they contain full DataFrames:
 
 - `runner_data.pkl`: Typically **several GB** (contains all input DataFrames).
-- `pre_apply_pss.pkl`: Typically **moderate** (rater-to-clique mapping, note topics, topic classifier).
+- `pre_get_scorers.pkl`: Typically **several GB** (post-PSS ratings, rater-to-clique mapping, note topics, topic classifier).
 
 Make sure the cache directory has sufficient disk space, and add it to
 `.gitignore` if it's inside the repo.

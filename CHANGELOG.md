@@ -329,6 +329,34 @@ Candidate selection tie-breaking differs between the two implementations: the or
 
 ---
 
+## 12. Optimize `apply_post_selection_similarity` — replace DataFrame merges with dict lookups
+
+**Date:** 2026-02-14 | **Before:** ~8 min (full scale) | **After:** ~2 min (full scale)
+
+This function filters ratings from PSS-flagged raters: dropping ratings where rater and note author are in the same clique, and deduplicating so only the earliest rating per (noteId, postSelectionValue) pair survives. At full scale (~197M ratings), it was the single slowest step remaining in the prescoring pipeline.
+
+### What the original did
+
+Three chained `DataFrame.merge()` calls on the full ratings DataFrame:
+1. Left-join ratings with PSS values on `raterParticipantId` — copies all ~40 columns for every row.
+2. Left-join with notes on `noteId` — copies everything again to add `noteAuthorParticipantId`.
+3. Left-join with PSS values again on `noteAuthorParticipantId` — third full copy.
+
+Then split the merged DataFrame into two subsets (has PSS / no PSS), sort + dedup one subset, and `pd.concat()` them back together. Two `drop_duplicates()` calls for diagnostic logging added ~2 minutes of pure overhead.
+
+### What the new version does
+
+1. **Dict lookups instead of merges**: builds two small dicts (`rater_to_pss` mapping rater → clique ID, `note_to_author` mapping noteId → author) and uses `Series.map()` for O(n) hash probes with no DataFrame copying.
+2. **Boolean mask instead of split/concat**: a single `drop_mask` Series identifies rows to remove (same-clique + PSS-dedup duplicates). One `ratings[~drop_mask]` operation filters in-place.
+3. **Dedup on 3-column slice**: the sort + `duplicated()` for PSS dedup operates on just `[noteId, createdAtMillis, pss_value]` extracted from the PSS-flagged subset (typically <1% of rows), not the full wide DataFrame.
+4. **Removed logging `drop_duplicates()`**: two calls to `ratings[[noteId, raterParticipantId]].drop_duplicates()` that existed purely for log messages (~55s each) were removed.
+
+### Dev cache checkpoint moved
+
+The dev cache checkpoint was moved from `pre_apply_pss` (before PSS filtering) to `pre_get_scorers` (after PSS filtering, right before `_get_scorers()`). The cached data now includes the post-PSS ratings DataFrame, so on cache hit the pipeline skips rater clustering, topic model, **and** PSS filtering.
+
+---
+
 ## 11. Rewrite `_make_seed_labels` — eliminate regex with plain string search
 
 **Date:** 2026-02-12 | **Before:** ~8 min (full scale) | **After:** ~45s (full scale)

@@ -239,7 +239,6 @@ class PostSelectionSimilarity:
     cliquesDf[c.postSelectionValueKey] = cliquesDf[c.postSelectionValueKey].astype(pd.Int64Dtype())
     return cliquesDf
 
-# this function takes about 8 minutes to run
 def apply_post_selection_similarity(notes, ratings, postSelectionSimilarityValues):
   """
   Filters out ratings after the first on each note from raters who have high post selection similarity,
@@ -247,10 +246,7 @@ def apply_post_selection_similarity(notes, ratings, postSelectionSimilarityValue
   """
   # Summarize input
   logger.info(f"Total ratings prior to applying post selection similarity: {len(ratings)}")
-  # takes about 55 seconds to run
-  logger.info(
-    f"Total unique ratings before: {len(ratings[[c.noteIdKey, c.raterParticipantIdKey]].drop_duplicates())}"
-  )
+
   pssSummary = (
     postSelectionSimilarityValues[[c.postSelectionValueKey, c.quasiCliqueValueKey]] > 0
   ).sum()
@@ -271,56 +267,55 @@ def apply_post_selection_similarity(notes, ratings, postSelectionSimilarityValue
     .dropna()
     .drop_duplicates()
   )
-  ratingsWithPostSelectionSimilarity = (
-    ratings.merge(
-      postSelectionSimilarityValues,
-      on=c.raterParticipantIdKey,
-      how="left",
-      unsafeAllowed=c.postSelectionValueKey,
-    )
-    .merge(notes[[c.noteIdKey, c.noteAuthorParticipantIdKey]], on=c.noteIdKey, how="left")
-    .merge(
-      postSelectionSimilarityValues,
-      left_on=c.noteAuthorParticipantIdKey,
-      right_on=c.raterParticipantIdKey,
-      how="left",
-      suffixes=("", "_note_author"),
-      unsafeAllowed={c.postSelectionValueKey, c.postSelectionValueKey + "_note_author"},
-    )
-  )
-  ratingsWithNoPostSelectionSimilarityValue = ratingsWithPostSelectionSimilarity[
-    pd.isna(ratingsWithPostSelectionSimilarity[c.postSelectionValueKey])
-  ]
-  ratingsWithPostSelectionSimilarityValue = ratingsWithPostSelectionSimilarity[
-    (~pd.isna(ratingsWithPostSelectionSimilarity[c.postSelectionValueKey]))
-    & (
-      ratingsWithPostSelectionSimilarity[c.postSelectionValueKey]
-      != ratingsWithPostSelectionSimilarity[c.postSelectionValueKey + "_note_author"]
-    )
-  ]
-  ratingsWithPostSelectionSimilarityValue.sort_values(
-    by=[c.noteIdKey, c.createdAtMillisKey], ascending=True, inplace=True
-  )
-  ratingsWithPostSelectionSimilarityValue.drop_duplicates(
-    subset=[c.noteIdKey, c.postSelectionValueKey], keep="first", inplace=True
-  )
 
   if len(notes) < c.minNumNotesForProdData:
     return ratings
 
-  ratings = pd.concat(
-    [ratingsWithPostSelectionSimilarityValue, ratingsWithNoPostSelectionSimilarityValue], axis=0
-  )
-  ratings.drop(
-    columns={c.noteAuthorParticipantIdKey, c.raterParticipantIdKey + "_note_author"},
-    errors="ignore",
-    inplace=True,
-  )
+  # Build lookup dicts: rater -> PSS clique ID, and noteId -> note author
+  rater_to_pss = dict(zip(
+    postSelectionSimilarityValues[c.raterParticipantIdKey],
+    postSelectionSimilarityValues[c.postSelectionValueKey],
+  ))
+  note_to_author = dict(zip(
+    notes[c.noteIdKey],
+    notes[c.noteAuthorParticipantIdKey],
+  ))
+
+  # Vectorized lookups — O(n) hash probes, no DataFrame copies
+  rater_pss = ratings[c.raterParticipantIdKey].map(rater_to_pss)
+  author_pss = ratings[c.noteIdKey].map(note_to_author).map(rater_to_pss)
+
+  # Add columns that downstream code expects
+  ratings[c.postSelectionValueKey] = rater_pss
+  ratings[c.postSelectionValueKey + "_note_author"] = author_pss
+
+  # Identify rows to drop.
+  # Note: the original merge-based implementation uses Int64Dtype (nullable integer) for
+  # PSS values.  When comparing Int64 with pd.NA, the result is pd.NA (not True/False),
+  # which is falsy during boolean indexing.  This means ratings from PSS-flagged raters
+  # on notes by non-PSS authors are implicitly dropped (they fall into neither the "no PSS"
+  # nor the "different PSS" subset).  We replicate that behavior here by requiring that the
+  # author also has a PSS value for a rating to survive the dedup path.
+  has_pss = rater_pss.notna()
+  author_has_pss = author_pss.notna()
+  # Keep only PSS ratings where the author also has a (different) PSS value
+  pss_diff = has_pss & author_has_pss & (rater_pss != author_pss)
+  # Everything else from a PSS rater is dropped (same clique, or author has no PSS)
+  drop_mask = has_pss & ~pss_diff
+
+  if pss_diff.any():
+    # Work on a tiny 3-column slice instead of the full ratings DataFrame
+    pss_sub = ratings.loc[pss_diff, [c.noteIdKey, c.createdAtMillisKey]].copy()
+    pss_sub['_pss'] = rater_pss[pss_diff].values
+    pss_sub.sort_values(by=[c.noteIdKey, c.createdAtMillisKey], ascending=True, inplace=True)
+    dup_idx = pss_sub.index[pss_sub.duplicated(subset=[c.noteIdKey, '_pss'], keep='first')]
+    drop_mask.loc[dup_idx] = True
+    del pss_sub
+
+  ratings = ratings[~drop_mask]
+  del rater_pss, author_pss, has_pss, author_has_pss, pss_diff, drop_mask
   logger.info(f"Total ratings after to applying post selection similarity: {len(ratings)}")
-  # takes about 55 seconds to run
-  logger.info(
-    f"Total unique ratings after: {len(ratings[[c.noteIdKey, c.raterParticipantIdKey]].drop_duplicates())}"
-  )
+
   return ratings
 
 
