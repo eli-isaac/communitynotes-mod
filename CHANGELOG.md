@@ -394,3 +394,24 @@ The `custom_tokenizer` method was recreating a `CountVectorizer` preprocessor an
 | `_make_seed_labels` | ~8 min | ~45s |
 | `custom_tokenizer` (2nd pass) | ~3 min | ~0s (cached) |
 | **Total speedup** | | **~10x + ~1 min saved on training** |
+
+---
+
+## 13. Convert participant IDs from strings to integers at data load time
+
+**Date:** 2026-02-17
+
+In dev, participant IDs contain letters (e.g. `"abc123"`), so the `Int64Dtype()` conversion in `run_prescoring` always fails silently, leaving IDs as Python string objects throughout the entire pipeline.
+
+**Problem:**
+- String/object columns in pandas store each value as a separate heap-allocated Python object (~50-80 bytes each) plus an 8-byte pointer, vs. 8 bytes per value for `Int64`.
+- Every merge, join, groupby, and `isin` on participant ID columns pays for string hashing (O(n) per string) and character-by-character comparison, plus poor CPU cache locality from pointer chasing.
+- The existing try/except in `run_prescoring` caught the `ValueError` and logged a message, but left the pipeline running with string IDs for all of prescoring and final scoring.
+
+**Solution:**
+- Added a `pd.factorize()`-based conversion in `runner.py` `_run_scorer`, immediately after data loading and sampling — the earliest possible point.
+- Collects all unique participant IDs from `ratings[raterParticipantIdKey]`, `statusHistory[noteAuthorParticipantIdKey]`, `userEnrollment[participantIdKey]`, and `notes[noteAuthorParticipantIdKey]` into one Series.
+- `pd.factorize()` produces a single consistent string-to-int mapping; `.map()` replaces all four columns in-place.
+- No reversal needed — participant IDs are opaque join keys, so the pipeline and outputs work identically with integer IDs.
+- The dev cache stores the already-converted DataFrames, so subsequent cached runs also benefit.
+- The existing `Int64Dtype()` conversion in `run_prescoring` now succeeds instead of falling through to the except branch.

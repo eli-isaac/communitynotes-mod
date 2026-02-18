@@ -1309,6 +1309,7 @@ def run_prescoring(
     logger.info(get_df_info(ratings, "ratings"))
     logger.info(get_df_info(noteStatusHistory, "noteStatusHistory"))
     logger.info(get_df_info(userEnrollment, "userEnrollment"))
+    
   prescoringModelResultsFromAllScorers = _run_scorers(
     args,
     scorers=list(chain(*scorers.values())),

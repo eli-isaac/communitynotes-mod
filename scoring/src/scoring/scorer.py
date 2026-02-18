@@ -137,6 +137,7 @@ class Scorer(ABC):
       ]
     logger.info(f"  Ratings after topic filter: {len(ratings)}")
     # Apply group filter
+    # takes about 80 seconds to run
     if self._includedGroups:
       userEnrollment = userEnrollment[[c.participantIdKey, c.modelingGroupKey]].rename(
         columns={c.participantIdKey: c.raterParticipantIdKey}

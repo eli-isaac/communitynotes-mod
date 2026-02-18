@@ -243,6 +243,22 @@ def _run_scorer(
       ratings = ratings.sample(frac=args.sample_ratings, random_state=42)
       logger.info(f"ratings reduced from {origSize} to {len(ratings)}")
 
+    # Convert participant IDs from strings to integers for memory and performance.
+    all_participant_ids = pd.concat([
+      ratings[c.raterParticipantIdKey],
+      statusHistory[c.noteAuthorParticipantIdKey],
+      userEnrollment[c.participantIdKey],
+      notes[c.noteAuthorParticipantIdKey],
+    ], ignore_index=True)
+    codes, uniques = pd.factorize(all_participant_ids)
+    id_map = dict(zip(uniques, range(len(uniques))))
+    ratings[c.raterParticipantIdKey] = ratings[c.raterParticipantIdKey].map(id_map)
+    statusHistory[c.noteAuthorParticipantIdKey] = statusHistory[c.noteAuthorParticipantIdKey].map(id_map)
+    userEnrollment[c.participantIdKey] = userEnrollment[c.participantIdKey].map(id_map)
+    notes[c.noteAuthorParticipantIdKey] = notes[c.noteAuthorParticipantIdKey].map(id_map)
+    del all_participant_ids, codes, uniques, id_map
+    logger.info("Participant IDs converted from strings to integers.")
+
     # Save to dev cache for next run.
     dev_cache.save("runner_data", {
       "notes": notes,

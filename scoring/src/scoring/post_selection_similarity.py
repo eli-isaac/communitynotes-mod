@@ -304,7 +304,7 @@ def apply_post_selection_similarity(notes, ratings, postSelectionSimilarityValue
   drop_mask = has_pss & ~pss_diff
 
   if pss_diff.any():
-    # Work on a tiny 3-column slice instead of the full ratings DataFrame
+    # Work on a 3-column slice of the ratings DataFrame instead of the full DataFrame
     pss_sub = ratings.loc[pss_diff, [c.noteIdKey, c.createdAtMillisKey]].copy()
     pss_sub['_pss'] = rater_pss[pss_diff].values
     pss_sub.sort_values(by=[c.noteIdKey, c.createdAtMillisKey], ascending=True, inplace=True)

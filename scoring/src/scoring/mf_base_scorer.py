@@ -437,7 +437,9 @@ class MFBaseScorer(Scorer):
     """
     if final:
       return process_data.filter_ratings(
-        ratings, minNumRatingsPerRater=0, minNumRatersPerNote=self._minNumRatersPerNote
+        ratings, 
+        minNumRatingsPerRater=0, 
+        minNumRatersPerNote=self._minNumRatersPerNote
       )
     else:
       return process_data.filter_ratings(
