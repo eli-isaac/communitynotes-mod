@@ -415,3 +415,28 @@ In dev, participant IDs contain letters (e.g. `"abc123"`), so the `Int64Dtype()`
 - No reversal needed — participant IDs are opaque join keys, so the pipeline and outputs work identically with integer IDs.
 - The dev cache stores the already-converted DataFrames, so subsequent cached runs also benefit.
 - The existing `Int64Dtype()` conversion in `run_prescoring` now succeeds instead of falling through to the except branch.
+
+---
+
+## 14. Enable GPU/MPS acceleration for reputation matrix factorization models
+
+**Date:** 2026-02-19
+
+The reputation MF subsystem (diligence model, helpfulness model) hardcoded `device=torch.device("cpu")` in every function signature, while the main `BiasedMatrixFactorization` model in `matrix_factorization/model.py` auto-detected CUDA/MPS at init time. This meant the reputation models always ran on CPU even when a GPU was available.
+
+**Problem:**
+- All functions in `diligence_model.py`, `helpfulness_model.py`, `reputation_matrix_factorization.py`, and `dataset.py` defaulted to `torch.device("cpu")`.
+- Callers in `mf_base_scorer.py` never passed a `device` argument, so the default always took effect.
+- `_setup_model` in `reputation_matrix_factorization.py` did not pass `device` through to `ReputationMFModel` at all — a latent bug that would have caused a device mismatch if anyone had tried to pass a non-CPU device.
+
+**Solution:**
+- Added a shared `detect_device()` function in `dataset.py` that mirrors the detection logic from `BiasedMatrixFactorization`: prefers `cuda:0` → `mps` → `cpu`.
+- Changed all `device=torch.device("cpu")` defaults to `device=None` across 4 files (10 function signatures total), with each function resolving `None` to `detect_device()` at call time.
+- Fixed `_setup_model` to accept and forward the `device` parameter to `ReputationMFModel`.
+- Callers that don't pass a device get automatic GPU detection; callers that pass an explicit device still work as before.
+
+**Files changed:**
+- `reputation_matrix_factorization/dataset.py` — added `detect_device()`, updated `build_dataset`
+- `reputation_matrix_factorization/reputation_matrix_factorization.py` — updated `ReputationMFModel.__init__`, `_setup_model`, `train_model_prescoring`, `train_model_final`
+- `reputation_matrix_factorization/diligence_model.py` — updated `_setup_dataset_and_hparams`, `fit_low_diligence_model_final`, `fit_low_diligence_model_prescoring`
+- `reputation_matrix_factorization/helpfulness_model.py` — updated `_setup_dataset_and_hparams`, `get_helpfulness_reputation_results_final`, `get_helpfulness_reputation_results_prescoring`
