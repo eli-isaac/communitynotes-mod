@@ -19,8 +19,7 @@ Example Usage:
     --ratings data/ratings \
     --status data/noteStatusHistory-00000.tsv \
     --outdir data \
-    --sample-ratings 0.1 \
-    --cache-dir .cache10
+    --cache-dir .cache
 """
 
 import logging

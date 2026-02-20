@@ -51,11 +51,12 @@ def build_dataset(
   raters = ratings[c.raterParticipantIdKey].drop_duplicates().sort_values().values
   raterIdToIndex = dict(zip(raters, np.arange(len(raters), dtype=np.int32)))
   # Generate tensors
-  noteTensor = torch.IntTensor(
-    [noteIdToIndex[noteId] for noteId in ratings[c.noteIdKey]], device=device
+  noteTensor = torch.tensor(
+    [noteIdToIndex[noteId] for noteId in ratings[c.noteIdKey]], dtype=torch.int32, device=device
   )
-  raterTensor = torch.IntTensor(
+  raterTensor = torch.tensor(
     [raterIdToIndex[raterId] for raterId in ratings[c.raterParticipantIdKey]],
+    dtype=torch.int32,
     device=device,
   )
   targetTensor = torch.tensor(targets, device=device, dtype=torch.float32)
