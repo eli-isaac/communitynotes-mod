@@ -2,7 +2,7 @@ import logging
 from typing import Optional, Tuple
 
 from .. import constants as c
-from .dataset import build_dataset
+from .dataset import build_dataset, detect_device
 from .reputation_matrix_factorization import (
   ReputationModelHyperparameters,
   train_model_final,
@@ -19,10 +19,12 @@ logger.setLevel(logging.INFO)
 
 def _setup_dataset_and_hparams(
   filteredRatings: pd.DataFrame,
-  device=torch.device("cpu"),
+  device=None,
   ratingsPerNoteLossRatio: Optional[float] = None,
   ratingsPerUserLossRatio: Optional[float] = None,
 ):
+  if device is None:
+    device = detect_device()
   # Define dataset
   targets = (
     (
@@ -100,7 +102,7 @@ def fit_low_diligence_model_final(
   globalInterceptDiligence: c.ReputationGlobalIntercept,
   ratingsPerNoteLossRatio: Optional[float] = None,
   ratingsPerUserLossRatio: Optional[float] = None,
-  device=torch.device("cpu"),
+  device=None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
   """
   Args:
@@ -108,8 +110,10 @@ def fit_low_diligence_model_final(
     noteInitStateDiligence: DataFrame containing initial state for notes (expects diligence prefixes e.g. lowDiligenceNoteIntercept)
     raterInitStateDiligence: DataFrame containing initial state for raters (expects diligence prefixes, not internal prefixes)
     globalInterceptDiligence: float
-    device: torch.device to use for training
+    device: torch.device to use for training. Auto-detected if None.
   """
+  if device is None:
+    device = detect_device()
   dataset, hParams = _setup_dataset_and_hparams(
     filteredRatings, device, ratingsPerNoteLossRatio, ratingsPerUserLossRatio
   )
@@ -152,8 +156,10 @@ def fit_low_diligence_model_prescoring(
   filteredRatings: pd.DataFrame,
   noteInitStateDiligence: Optional[pd.DataFrame] = None,
   raterInitStateDiligence: Optional[pd.DataFrame] = None,
-  device=torch.device("cpu"),
+  device=None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, c.ReputationGlobalIntercept]:
+  if device is None:
+    device = detect_device()
   dataset, hParams = _setup_dataset_and_hparams(filteredRatings, device)
   noteInitStateInternal, raterInitStateInternal = _prepare_diligence_init_state(
     noteInitStateDiligence, raterInitStateDiligence

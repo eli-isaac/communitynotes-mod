@@ -2,7 +2,7 @@ import logging
 from typing import Optional, Tuple
 
 from .. import constants as c
-from .dataset import build_dataset
+from .dataset import build_dataset, detect_device
 from .reputation_matrix_factorization import (
   ReputationModelHyperparameters,
   train_model_final,
@@ -19,8 +19,10 @@ logger.setLevel(logging.INFO)
 
 def _setup_dataset_and_hparams(
   filteredRatings: pd.DataFrame,
-  device=torch.device("cpu"),
+  device=None,
 ):
+  if device is None:
+    device = detect_device()
   # Define dataset
   targets = filteredRatings[c.helpfulNumKey].values
   dataset = build_dataset(filteredRatings, targets, device=device)
@@ -67,8 +69,10 @@ def get_helpfulness_reputation_results_final(
   noteInitState: pd.DataFrame,
   raterInitState: pd.DataFrame,
   globalIntercept: c.ReputationGlobalIntercept,
-  device=torch.device("cpu"),
+  device=None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+  if device is None:
+    device = detect_device()
   dataset, hParams = _setup_dataset_and_hparams(filteredRatings, device)
 
   # Hack: convert "diligenceRound2" to internal round 2, since the diligence fields are used as placeholders
@@ -116,8 +120,10 @@ def get_helpfulness_reputation_results_prescoring(
   filteredRatings: pd.DataFrame,
   noteInitState: Optional[pd.DataFrame] = None,
   raterInitState: Optional[pd.DataFrame] = None,
-  device=torch.device("cpu"),
+  device=None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, c.ReputationGlobalIntercept]:
+  if device is None:
+    device = detect_device()
   dataset, hParams = _setup_dataset_and_hparams(filteredRatings, device)
 
   # Train model

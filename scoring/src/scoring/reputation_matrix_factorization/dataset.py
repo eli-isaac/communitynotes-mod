@@ -8,6 +8,14 @@ import pandas as pd
 import torch
 
 
+def detect_device() -> torch.device:
+  if torch.cuda.is_available():
+    return torch.device("cuda:0")
+  if torch.backends.mps.is_available():
+    return torch.device("mps")
+  return torch.device("cpu")
+
+
 @dataclass
 class MatrixFactorizationDataset:
   # Tensors specifying the note, rater and target for each rating
@@ -25,15 +33,18 @@ class MatrixFactorizationDataset:
 def build_dataset(
   ratings: pd.DataFrame,
   targets: np.ndarray,
-  device: torch.device = torch.device("cpu"),
+  device: torch.device = None,
 ) -> MatrixFactorizationDataset:
   """Compose and return a MatrixFactorizationDataset given ratings and targets.
 
   Args:
     ratings: DF specifying notes and raters
     targets: numpy array specifying target values
-    device: torch device where tensors should be stored (e.g. cuda, mps, cpu)
+    device: torch device where tensors should be stored (e.g. cuda, mps, cpu).
+            Auto-detected if None.
   """
+  if device is None:
+    device = detect_device()
   # Identify mappings from note and rater IDs to indices
   notes = ratings[c.noteIdKey].drop_duplicates().sort_values().values
   noteIdToIndex = dict(zip(notes, np.arange(len(notes), dtype=np.int32)))

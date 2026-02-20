@@ -4,6 +4,7 @@ import time
 from typing import Optional
 
 from .. import constants as c
+from .dataset import detect_device
 from .weighted_loss import WeightedLoss
 
 import numpy as np
@@ -80,7 +81,7 @@ class ReputationMFModel(nn.Module):
     noteInitState: Optional[pd.DataFrame] = None,
     raterInitState: Optional[pd.DataFrame] = None,
     globalInterceptInit: Optional[float] = None,
-    device=torch.device("cpu"),
+    device=None,
     defaultReputation=1.0,
     ratingPerNoteLossRatio: Optional[float] = None,
     ratingPerUserLossRatio: Optional[float] = None,
@@ -94,6 +95,8 @@ class ReputationMFModel(nn.Module):
     For diligence model: may want to map these names back to internal before calling this function.
     """
     super().__init__()
+    if device is None:
+      device = detect_device()
     # Save hyperparameters
     self.activation_fn = activation_fn
     self.nDim = nDim
@@ -326,6 +329,7 @@ def _setup_model(
   noteInitState: pd.DataFrame,
   raterInitState: pd.DataFrame,
   globalInterceptInit: Optional[float] = None,
+  device=None,
 ):
   # Define model
   activation_fn = None
@@ -358,6 +362,7 @@ def _setup_model(
     noteInitState=noteInitState,
     raterInitState=raterInitState,
     globalInterceptInit=globalInterceptInit,
+    device=device,
     defaultReputation=hParams.defaultReputation,
     ratingPerNoteLossRatio=hParams.ratingPerNoteLossRatio,
     ratingPerUserLossRatio=hParams.ratingPerUserLossRatio,
@@ -371,9 +376,11 @@ def train_model_prescoring(
   dataset,
   noteInitState: Optional[pd.DataFrame] = None,
   raterInitState: Optional[pd.DataFrame] = None,
-  device=torch.device("cpu"),
+  device=None,
 ):
-  model, loss_fn = _setup_model(dataset, hParams, noteInitState, raterInitState)
+  if device is None:
+    device = detect_device()
+  model, loss_fn = _setup_model(dataset, hParams, noteInitState, raterInitState, device=device)
 
   logger.info("Reputation Matrix Factorization: rater reputation frozen")
   logger.info("Round 1:")
@@ -451,7 +458,7 @@ def train_model_final(
   noteInitState: pd.DataFrame,
   raterInitState: pd.DataFrame,
   globalInterceptInit: c.ReputationGlobalIntercept,
-  device=torch.device("cpu"),
+  device=None,
 ):
   """
   Args:
@@ -460,6 +467,8 @@ def train_model_final(
     noteInitState (Optional[pd.DataFrame]): expects internal column names e.g. internalNoteIntercept
     raterInitState (Optional[pd.DataFrame]): expects internal column names e.g. internalRaterIntercept
   """
+  if device is None:
+    device = detect_device()
   hParams.defaultReputation = 0.0  # 0 reputation for raters missing from init.
 
   # setup_model initializes uses the internal intercepts, but we want to initialize with round 2 intercepts,
@@ -470,7 +479,7 @@ def train_model_final(
   raterInitState[c.internalRaterInterceptKey] = raterInitState[c.internalRaterInterceptRound2Key]
 
   model, loss_fn = _setup_model(
-    dataset, hParams, noteInitState, raterInitState, globalInterceptInit.secondRound
+    dataset, hParams, noteInitState, raterInitState, globalInterceptInit.secondRound, device=device
   )
 
   logger.info(
