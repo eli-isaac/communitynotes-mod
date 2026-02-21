@@ -499,13 +499,14 @@ def _run_scorers(
     scoringArgs.ratings = scoringArgs.ratings.sort_values(
       [c.highVolumeRaterKey, c.correlatedRaterKey], ascending=True
     )
-    modelResultsAndTimes = [
-      _run_scorer_in_series(
+    modelResultsAndTimes = []
+    for scorer in scorers:
+      result = _run_scorer_in_series(
         scorer=scorer,
         scoringArgs=scoringArgs,
       )
-      for scorer in scorers
-    ]
+      modelResultsAndTimes.append(result)
+      gc.collect()
 
   modelResultsTuple, scorerTimesTuple = zip(*modelResultsAndTimes)
 
@@ -1235,9 +1236,11 @@ def run_prescoring(
   if cachedRatings is not None:
     # Cache hit: skip topic model and PSS filtering entirely.
     ratings = cachedRatings
+    del cachedRatings
     assert cachedNoteTopics is not None and cachedNoteTopicClassifierPipe is not None
     noteTopics = cachedNoteTopics
     noteTopicClassifierPipe = cachedNoteTopicClassifierPipe
+    del cachedNoteTopics, cachedNoteTopicClassifierPipe
     logger.info(
       f"Using cached post-PSS ratings ({len(ratings)} rows), noteTopics, and noteTopicClassifierPipe."
     )
@@ -2113,6 +2116,7 @@ def run_scoring(
     cachedNoteTopics = cached["noteTopics"]
     cachedNoteTopicClassifierPipe = cached["noteTopicClassifierPipe"]
     cachedRatings = cached["ratings"]
+    del cached
     logger.info(
       "Restored from cache (pre_get_scorers) — skipping run_rater_clustering + topic model + PSS, jumping to _get_scorers"
     )
@@ -2147,6 +2151,10 @@ def run_scoring(
     cachedNoteTopicClassifierPipe=cachedNoteTopicClassifierPipe,
     cachedRatings=cachedRatings,
   )
+
+  del prescoringNotesInput, prescoringRatingsInput
+  del postSelectionSimilarityValues, cachedRatings, cachedNoteTopics, cachedNoteTopicClassifierPipe
+  gc.collect()
 
   logger.info("We invoked run_scoring and are now in between prescoring and scoring.")
   if writePrescoringScoringOutputCallback is not None:

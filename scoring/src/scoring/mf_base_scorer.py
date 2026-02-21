@@ -513,17 +513,19 @@ class MFBaseScorer(Scorer):
     self, scoredNotes, raterParams, ratings
   ) -> Dict[str, float]:
     with c.time_block(f"{self.get_name()}: Compute tag thresholds for percentiles"):
-      # Compute tag aggregates (in the same way as is done in final scoring in note_ratings.compute_scored_notes)
       tagAggregates = tag_filter.get_note_tag_aggregates(ratings, scoredNotes, raterParams)
       assert len(tagAggregates) == len(
         scoredNotes
       ), "There should be one aggregate per scored note."
       scoredNotes = tagAggregates.merge(scoredNotes, on=c.noteIdKey, how="outer")
+      del tagAggregates
 
-      # Compute percentile thresholds for each tag
       crhNotes = scoredNotes[scoredNotes[c.currentlyRatedHelpfulBoolKey]][[c.noteIdKey]]
       crhStats = scoredNotes.merge(crhNotes, on=c.noteIdKey, how="inner")
+      del scoredNotes, crhNotes
       thresholds = tag_filter.get_tag_thresholds(crhStats, self._tagFilterPercentile)
+      del crhStats
+      gc.collect()
     return thresholds
 
   def _prescore_notes_and_users(
@@ -848,6 +850,8 @@ class MFBaseScorer(Scorer):
         )
       if not self._saveIntermediateState:
         del validRatings
+        del scoredNotes
+        del helpfulnessScoresPreHarassmentFilter
         gc.collect()
       if self._saveIntermediateState:
         self.helpfulnessScores = helpfulnessScores
@@ -868,6 +872,9 @@ class MFBaseScorer(Scorer):
           ],
           helpfulnessScores[[c.raterParticipantIdKey, c.aboveHelpfulnessThresholdKey]],
         )
+        if not self._saveIntermediateState:
+          del ratingsForTraining
+          gc.collect()
         noteParams, raterParams, globalBias = self._mfRanker.run_mf(
           ratings=finalRoundRatings[[c.noteIdKey, c.raterParticipantIdKey, c.helpfulNumKey]],
           noteInit=noteParamsUnfiltered[
@@ -917,6 +924,7 @@ class MFBaseScorer(Scorer):
         on=c.noteIdKey,
         how="left",
       )
+      del harassmentAbuseNoteParams
       raterParams = raterParams.merge(diligenceRaterParams, on=c.raterParticipantIdKey)
 
     # Compute scored notes -- currently not returned; only used for downstream computation.
@@ -1053,11 +1061,10 @@ class MFBaseScorer(Scorer):
     )
 
     noteModelOutput = noteParams
-    # Returning should remove references to these, but manually trigger GC just to reclaim
-    # resources as soon as possible.
     del ratings
-    del ratingsForTraining
     del finalRoundRatings
+    del noteParamsUnfiltered
+    del raterParamsUnfiltered
     gc.collect()
     return noteModelOutput, raterModelOutput, metaOutput
 
@@ -1126,6 +1133,9 @@ class MFBaseScorer(Scorer):
       finalRoundRatings = helpfulness_scores.filter_ratings_by_helpfulness_scores(
         ratingsForTraining, prescoringRaterModelOutput
       )
+      if not self._saveIntermediateState:
+        del ratingsForTraining
+        gc.collect()
       if self._saveIntermediateState:
         self.finalRoundRatings = finalRoundRatings
 
