@@ -473,3 +473,22 @@ The pipeline was being killed by the OOM killer during prescoring — specifical
 - `del prescoringNotesInput, prescoringRatingsInput, postSelectionSimilarityValues, cachedRatings, cachedNoteTopics, cachedNoteTopicClassifierPipe` + `gc.collect()` in `run_scoring` after prescoring returns.
 - Converted the serial scorer list comprehension in `_run_scorers` to a `for` loop with `gc.collect()` after each scorer completes.
 
+---
+
+## 16. Fix participant-ID dtype mismatches that crash merges/concats after factorization
+
+**Date:** 2026-02-22
+
+After converting participant IDs from strings to dense `int64` via `pd.factorize` (entry 13), several code paths still created DataFrames where ID columns defaulted to `object` or `float64` — particularly when results were empty (0 rows). This caused `ValueError: You are trying to merge on object and float64 columns` crashes during `run_rater_clustering` and would surface in other merge/concat operations as well.
+
+**Root cause:** `pd.DataFrame(columns=[...])` creates all columns as `object` dtype, and `pd.DataFrame({"key": []})` defaults to `float64`. When these empty DataFrames are merged or concatenated with non-empty DataFrames that have `int64` ID columns, pandas raises a type-mismatch error.
+
+**Fixes:**
+
+- **`scorer.py`** — Added `_empty_df_typed()` helper that creates empty DataFrames with correct `int64` dtype for known ID columns (`raterParticipantId`, `noteAuthorParticipantId`, `participantId`, `noteId`). Updated `prescore()` and `_return_empty_final_scores()` to use it.
+- **`post_selection_similarity.py`** — `get_post_selection_similarity_values()`: when `cliquesDfList` is empty, return a DataFrame with explicit `int64` / `Int64` dtypes instead of the default `object`. Also cast `raterParticipantId` to `int64` in the non-empty path.
+- **`quasi_clique_detection.py`** — `get_quasi_cliques()`: wrap `raterIds` in `pd.array(..., dtype=np.int64)` so the column is `int64` even when empty.
+- **`gaussian_scorer.py`** — Two early-return paths that returned bare `pd.DataFrame()` (no columns at all) now raise `EmptyRatingException`, which the caller in `scorer.py` already catches and handles with properly-typed empty DataFrames. Also fixes a latent `NameError` in the "not enough raters" branch where `quantile_range` was never set.
+- **`mf_base_scorer.py`** — Same pattern: the `len(finalRoundRatings) == 0` early return in `_score_notes_and_users` now raises `EmptyRatingException` instead of returning bare `pd.DataFrame()`.
+- **`matrix_factorization/pseudo_raters.py`** — Removed the `str()` conversion of extreme-rater IDs (line 223, a relic of the string-ID era). Updated the dtype-matching logic to use `astype(existingIdDtype)` instead of only handling `pd.Int64Dtype`, so it works with both `Int64` (prescoring) and `int64` (final scoring).
+

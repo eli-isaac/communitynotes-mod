@@ -220,8 +220,6 @@ class PseudoRatersRunner:
       }
     )
     for extremeRater in self.extremeRaters:
-      extremeRater[c.raterParticipantIdKey] = str(extremeRater[c.raterParticipantIdKey])
-
       # Since LCB is turned off, don't waste compute on not-helpful pseudoratings.
       for helpfulNum in [1.0]:  # Only helpful ratings
         extremeRater[c.helpfulNumKey] = helpfulNum
@@ -244,12 +242,10 @@ class PseudoRatersRunner:
         [c.internalRaterInterceptKey, c.internalRaterFactor1Key], axis=1
       )
       extremeRatingsToAdd[c.noteIdKey] = extremeRatingsToAdd[c.noteIdKey].astype(np.int64)
-      if isinstance(self.ratingFeaturesAndLabels[c.raterParticipantIdKey].dtype, pd.Int64Dtype):
-        # Only convert ID type from string to Int64 if is necessary to match existing IDs (which is
-        # expected when running in prod, but not always in unit tests or public data.)
-        extremeRatingsToAdd[c.raterParticipantIdKey] = extremeRatingsToAdd[
-          c.raterParticipantIdKey
-        ].astype(pd.Int64Dtype())
+      existingIdDtype = self.ratingFeaturesAndLabels[c.raterParticipantIdKey].dtype
+      extremeRatingsToAdd[c.raterParticipantIdKey] = extremeRatingsToAdd[
+        c.raterParticipantIdKey
+      ].astype(existingIdDtype)
       ratingFeaturesAndLabelsWithExtremeRatings = pd.concat(
         [self.ratingFeaturesAndLabels, extremeRatingsToAdd]
       )

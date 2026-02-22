@@ -233,9 +233,15 @@ class PostSelectionSimilarity:
     for cliqueId in cliqueToUserMap.keys():
       for userId in cliqueToUserMap[cliqueId]:
         cliquesDfList.append({c.raterParticipantIdKey: userId, c.postSelectionValueKey: cliqueId})
+    if not cliquesDfList:
+      return pd.DataFrame(
+        {c.raterParticipantIdKey: pd.array([], dtype=np.int64),
+         c.postSelectionValueKey: pd.array([], dtype=pd.Int64Dtype())}
+      )
     cliquesDf = pd.DataFrame(
       cliquesDfList, columns=[c.raterParticipantIdKey, c.postSelectionValueKey]
     )
+    cliquesDf[c.raterParticipantIdKey] = cliquesDf[c.raterParticipantIdKey].astype(np.int64)
     cliquesDf[c.postSelectionValueKey] = cliquesDf[c.postSelectionValueKey].astype(pd.Int64Dtype())
     return cliquesDf
 

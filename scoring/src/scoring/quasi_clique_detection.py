@@ -532,7 +532,7 @@ class QuasiCliqueDetection:
         raterIds.append(rater)
     return pd.DataFrame(
       {
-        c.raterParticipantIdKey: raterIds,
+        c.raterParticipantIdKey: pd.array(raterIds, dtype=np.int64),
         c.quasiCliqueValueKey: pd.array(cliqueIds, dtype=pd.Int64Dtype()),
       }
     )

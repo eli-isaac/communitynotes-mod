@@ -1150,7 +1150,7 @@ class MFBaseScorer(Scorer):
     ), "Missing final round num users"
 
     if len(finalRoundRatings) == 0:
-      return pd.DataFrame(), pd.DataFrame()
+      raise EmptyRatingException
 
     # Re-runs matrix factorization using only ratings given by helpful raters.
     with self.time_block("Final helpfulness-filtered MF"):

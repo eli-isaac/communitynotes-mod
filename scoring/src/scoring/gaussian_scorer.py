@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from . import constants as c, helpfulness_scores, note_ratings, process_data, tag_filter
 from .mf_core_scorer import MFCoreScorer
 from .reputation_matrix_factorization.diligence_model import fit_low_diligence_model_final
-from .scorer import Scorer
+from .scorer import EmptyRatingException, Scorer
 
 import numpy as np
 import pandas as pd
@@ -555,8 +555,7 @@ class GaussianScorer(Scorer):
         logger.info(f"quantile range: {quantile_range}")
       # if there are not enough unique raters to even calculate bins, do not predict
       else:
-        scoredNotes = pd.DataFrame(columns=self.get_internal_scored_notes_cols())
-        helpfulnessScores = pd.DataFrame(columns=self.get_internal_helpfulness_scores_cols())
+        raise EmptyRatingException
 
     else:
       quantile_range = c.quantileRange
@@ -572,7 +571,7 @@ class GaussianScorer(Scorer):
     ), "Missing final round num users"
 
     if len(finalRoundRatings) == 0:
-      return pd.DataFrame(), pd.DataFrame()
+      raise EmptyRatingException
 
     raterParams = prescoringRaterModelOutput[
       [c.raterParticipantIdKey, c.internalRaterInterceptKey, c.internalRaterFactor1Key]

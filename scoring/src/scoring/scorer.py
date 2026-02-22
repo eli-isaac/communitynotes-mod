@@ -19,6 +19,22 @@ logger.setLevel(logging.INFO)
 
 _IN_GROUP = "inGroup"
 
+_ID_DTYPES = {
+  c.raterParticipantIdKey: np.int64,
+  c.noteAuthorParticipantIdKey: np.int64,
+  c.participantIdKey: np.int64,
+  c.noteIdKey: np.int64,
+}
+
+
+def _empty_df_typed(columns: List[str]) -> pd.DataFrame:
+  """Create an empty DataFrame whose ID columns have the correct int64 dtype."""
+  df = pd.DataFrame(columns=columns)
+  for col in columns:
+    if col in _ID_DTYPES:
+      df[col] = df[col].astype(_ID_DTYPES[col])
+  return df
+
 
 class EmptyRatingException(Exception):
   """Exception rasied when no ratings are available"""
@@ -271,14 +287,14 @@ class Scorer(ABC):
     output that can be used to initialize and reduce the runtime of final scoring.
     """
     emptyModelResult = ModelResult(
-      pd.DataFrame(columns=self.get_internal_scored_notes_cols()),
+      _empty_df_typed(self.get_internal_scored_notes_cols()),
       (
-        pd.DataFrame(columns=self.get_internal_helpfulness_scores_cols())
+        _empty_df_typed(self.get_internal_helpfulness_scores_cols())
         if self.get_internal_helpfulness_scores_cols()
         else None
       ),
       (
-        pd.DataFrame(columns=self.get_auxiliary_note_info_cols())
+        _empty_df_typed(self.get_auxiliary_note_info_cols())
         if self.get_auxiliary_note_info_cols()
         else None
       ),
@@ -349,14 +365,14 @@ class Scorer(ABC):
 
   def _return_empty_final_scores(self) -> ModelResult:
     return ModelResult(
-      scoredNotes=pd.DataFrame(columns=self.get_scored_notes_cols()),
+      scoredNotes=_empty_df_typed(self.get_scored_notes_cols()),
       helpfulnessScores=(
-        pd.DataFrame(columns=self.get_helpfulness_scores_cols())
+        _empty_df_typed(self.get_helpfulness_scores_cols())
         if self.get_helpfulness_scores_cols()
         else None
       ),
       auxiliaryNoteInfo=(
-        pd.DataFrame(columns=self.get_auxiliary_note_info_cols())
+        _empty_df_typed(self.get_auxiliary_note_info_cols())
         if self.get_auxiliary_note_info_cols()
         else None
       ),
