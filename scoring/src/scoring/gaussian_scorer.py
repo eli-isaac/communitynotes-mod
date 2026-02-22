@@ -748,13 +748,17 @@ class GaussianScorer(Scorer):
     logger.info(
       f"Total Ratings vs Low Vol Ratings ({self.get_name()}): {len(ratings)} vs {lowVolCount}"
     )
-    noteScoresNoHighVol, _ = self._score_notes_and_users(
-      ratings=ratings.iloc[:lowVolCount],
-      noteStatusHistory=noteStatusHistory,
-      prescoringNoteModelOutput=prescoringNoteModelOutput,
-      prescoringRaterModelOutput=prescoringRaterModelOutput,
-      prescoringMetaScorerOutput=prescoringMetaScorerOutput,
-    )
+    try:
+      noteScoresNoHighVol, _ = self._score_notes_and_users(
+        ratings=ratings.iloc[:lowVolCount],
+        noteStatusHistory=noteStatusHistory,
+        prescoringNoteModelOutput=prescoringNoteModelOutput,
+        prescoringRaterModelOutput=prescoringRaterModelOutput,
+        prescoringMetaScorerOutput=prescoringMetaScorerOutput,
+      )
+    except EmptyRatingException:
+      logger.info(f"EmptyRatingException in no-high-vol scoring for {self.get_name()}")
+      noteScoresNoHighVol = pd.DataFrame()
     logger.info(
       f"noteScoresNoHighVol Summary {self.get_name()}: length ({len(noteScoresNoHighVol)}), cols ({', '.join(noteScoresNoHighVol.columns)})"
     )
@@ -790,13 +794,17 @@ class GaussianScorer(Scorer):
     logger.info(
       f"Total Ratings vs Non-Correlated Ratings ({self.get_name()}): {len(ratings)} vs {totalUncorrelatedRatings}"
     )
-    noteScoresNoCorrelated, _ = self._score_notes_and_users(
-      ratings=uncorrelatedRatings,
-      noteStatusHistory=noteStatusHistory,
-      prescoringNoteModelOutput=prescoringNoteModelOutput,
-      prescoringRaterModelOutput=prescoringRaterModelOutput,
-      prescoringMetaScorerOutput=prescoringMetaScorerOutput,
-    )
+    try:
+      noteScoresNoCorrelated, _ = self._score_notes_and_users(
+        ratings=uncorrelatedRatings,
+        noteStatusHistory=noteStatusHistory,
+        prescoringNoteModelOutput=prescoringNoteModelOutput,
+        prescoringRaterModelOutput=prescoringRaterModelOutput,
+        prescoringMetaScorerOutput=prescoringMetaScorerOutput,
+      )
+    except EmptyRatingException:
+      logger.info(f"EmptyRatingException in no-correlated scoring for {self.get_name()}")
+      noteScoresNoCorrelated = pd.DataFrame()
     logger.info(
       f"noteScoresNoCorrelated Summary {self.get_name()}: length ({len(noteScoresNoCorrelated)}), cols ({', '.join(noteScoresNoCorrelated.columns)})"
     )
@@ -826,14 +834,18 @@ class GaussianScorer(Scorer):
         f"Total Ratings vs Population Sampled Ratings ({self.get_name()}): {len(ratings)} vs {len(populationSampledRatings)}"
       )
 
-      noteScoresPopulationSampled, _ = self._score_notes_and_users(
-        ratings=populationSampledRatings,
-        noteStatusHistory=noteStatusHistory,
-        prescoringNoteModelOutput=prescoringNoteModelOutput,
-        prescoringRaterModelOutput=prescoringRaterModelOutput,
-        prescoringMetaScorerOutput=prescoringMetaScorerOutput,
-        ratingPerNoteLossRatio=self._populationSampledRatingPerNoteLossRatio,
-      )
+      try:
+        noteScoresPopulationSampled, _ = self._score_notes_and_users(
+          ratings=populationSampledRatings,
+          noteStatusHistory=noteStatusHistory,
+          prescoringNoteModelOutput=prescoringNoteModelOutput,
+          prescoringRaterModelOutput=prescoringRaterModelOutput,
+          prescoringMetaScorerOutput=prescoringMetaScorerOutput,
+          ratingPerNoteLossRatio=self._populationSampledRatingPerNoteLossRatio,
+        )
+      except EmptyRatingException:
+        logger.info(f"EmptyRatingException in population-sampled scoring for {self.get_name()}")
+        noteScoresPopulationSampled = pd.DataFrame()
       logger.info(
         f"noteScoresPopulationSampled Summary {self.get_name()}: length ({len(noteScoresPopulationSampled)}), cols ({', '.join(noteScoresPopulationSampled.columns)})"
       )
@@ -860,17 +872,21 @@ class GaussianScorer(Scorer):
       )
       noteScoresPopulationSampled = None
 
-    noteScores, userScores = self._score_notes_and_users(
-      ratings=ratings,
-      noteStatusHistory=noteStatusHistory,
-      prescoringNoteModelOutput=prescoringNoteModelOutput,
-      prescoringRaterModelOutput=prescoringRaterModelOutput,
-      prescoringMetaScorerOutput=prescoringMetaScorerOutput,
-      flipFactorsForIdentification=False,
-      noteScoresNoHighVol=noteScoresNoHighVol,
-      noteScoresNoCorrelated=noteScoresNoCorrelated,
-      noteScoresPopulationSampled=noteScoresPopulationSampled,
-    )
+    try:
+      noteScores, userScores = self._score_notes_and_users(
+        ratings=ratings,
+        noteStatusHistory=noteStatusHistory,
+        prescoringNoteModelOutput=prescoringNoteModelOutput,
+        prescoringRaterModelOutput=prescoringRaterModelOutput,
+        prescoringMetaScorerOutput=prescoringMetaScorerOutput,
+        flipFactorsForIdentification=False,
+        noteScoresNoHighVol=noteScoresNoHighVol,
+        noteScoresNoCorrelated=noteScoresNoCorrelated,
+        noteScoresPopulationSampled=noteScoresPopulationSampled,
+      )
+    except EmptyRatingException:
+      logger.info(f"EmptyRatingException in main scoring for {self.get_name()}")
+      return self._return_empty_final_scores()
     logger.info(
       f"noteScores Summary {self.get_name()}: length ({len(noteScores)}), cols ({', '.join(noteScores.columns)})"
     )
