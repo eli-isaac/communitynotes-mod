@@ -228,6 +228,10 @@ def get_valid_ratings(
   doTypeCheck: bool = True,
 ) -> pd.DataFrame:
   """Determine which ratings are "valid" (used to determine rater helpfulness score)
+    - Removes ratings that rated helpfulness as 0.5
+    - Removes ratings on notes that have NMR status
+    - Only keeps ratings that were rated before the last status change of the note or the TSV was not released yet
+    - Adds a bunch of statistics columns
 
   See definition here: https://twitter.github.io/communitynotes/contributor-scores/#valid-ratings
 
@@ -299,7 +303,8 @@ def get_valid_ratings(
     c.unsuccessfulRatingTotal,
   ] = True
   binaryRatingsOnNotesWithStatusLabels.loc[
-    helpfulRatingOnCrhNote | notHelpfulRatingOnCrnhNote, c.ratingAgreesWithNoteStatusKey
+    helpfulRatingOnCrhNote | notHelpfulRatingOnCrnhNote,
+    c.ratingAgreesWithNoteStatusKey
   ] = True
 
   if log:
