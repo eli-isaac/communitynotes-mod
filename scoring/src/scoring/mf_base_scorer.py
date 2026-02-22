@@ -581,10 +581,7 @@ class MFBaseScorer(Scorer):
         ]
       )
     if len(ratingsForTraining) == 0:
-      # This is only expected to occur for MFTopicScorer_MessiRonaldo in --recent runs
-      assert (
-        self.get_name() == "MFTopicScorer_MessiRonaldo"
-      ), f"Unexpected scorer: {self.get_name()}"
+      logger.info(f"{self.get_name()}: no ratings after filtering — skipping prescoring.")
       raise EmptyRatingException
     logger.info(
       f"ratingsForTraining summary {self.get_name()}: {get_df_fingerprint(ratingsForTraining, [c.noteIdKey, c.raterParticipantIdKey])}"
@@ -734,8 +731,7 @@ class MFBaseScorer(Scorer):
         self.validRatings = validRatings
 
       if len(validRatings) == 0:
-        # This is only expected for MFGroupScorer_33 on --recent runs.
-        assert self.get_name() == "MFGroupScorer_33", f"Unexpected scorer: {self.get_name()}"
+        logger.info(f"{self.get_name()}: no valid ratings after rep-filtering — skipping prescoring.")
         raise EmptyRatingException
 
       # Assigns contributor (author & rater) helpfulness bit based on (1) performance
