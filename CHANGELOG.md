@@ -415,6 +415,7 @@ In dev, participant IDs contain letters (e.g. `"abc123"`), so the `Int64Dtype()`
 - No reversal needed — participant IDs are opaque join keys, so the pipeline and outputs work identically with integer IDs.
 - The dev cache stores the already-converted DataFrames, so subsequent cached runs also benefit.
 - The existing `Int64Dtype()` conversion in `run_prescoring` now succeeds instead of falling through to the except branch.
+- Fixed the post-prescoring ID restoration in `run_prescoring`: the original code used `.astype(str)` to "restore" IDs after prescoring's temporary `Int64` conversion. This was designed for the old string-ID regime and left `ratings`, `noteStatusHistory`, and `userEnrollment` as **object/str** while `notes` remained **int64** (since it was never part of the conversion). Changed the restoration to `.astype(np.int64)` so all DataFrames stay type-consistent with the factorized IDs. Also saves ~8 GB of memory (int64 = 8 bytes/value vs. str objects = ~50+ bytes/value for ~190M ratings).
 
 ---
 
@@ -440,3 +441,35 @@ The reputation MF subsystem (diligence model, helpfulness model) hardcoded `devi
 - `reputation_matrix_factorization/reputation_matrix_factorization.py` — updated `ReputationMFModel.__init__`, `_setup_model`, `train_model_prescoring`, `train_model_final`
 - `reputation_matrix_factorization/diligence_model.py` — updated `_setup_dataset_and_hparams`, `fit_low_diligence_model_final`, `fit_low_diligence_model_prescoring`
 - `reputation_matrix_factorization/helpfulness_model.py` — updated `_setup_dataset_and_hparams`, `get_helpfulness_reputation_results_final`, `get_helpfulness_reputation_results_prescoring`
+
+---
+
+## 15. Aggressive memory cleanup to prevent OOM kills during scoring
+
+**Date:** 2026-02-21
+
+The pipeline was being killed by the OOM killer during prescoring — specifically during the MFExpansionScorer's `compute_tag_thresholds_for_percentile` step. At that point, ~55-60 GB of DataFrames were alive simultaneously across multiple layers of the call stack: two full copies of the ratings data (~19 GB each), plus scorer intermediates that were never freed.
+
+**Problem — large DataFrames kept alive unnecessarily:**
+- `ratingsForTraining` (~15-19 GB) inside each scorer's `_prescore_notes_and_users` was only deleted at the very end of the method, long after its last real use (creating `finalRoundRatings`).
+- `scoredNotes` (first computation), `helpfulnessScoresPreHarassmentFilter`, and `harassmentAbuseNoteParams` were never explicitly freed despite being superseded by later computations.
+- `compute_tag_thresholds_for_percentile` created several large intermediate DataFrames (`tagAggregates`, merged `scoredNotes`, `crhNotes`, `crhStats`) and returned without deleting any of them.
+- The `cached` dict from `dev_cache.load("pre_get_scorers")` held redundant references to all its values alongside the extracted local variables.
+- After prescoring, `cachedRatings`, `prescoringNotesInput`, `prescoringRatingsInput`, and `postSelectionSimilarityValues` remained alive in `run_scoring`'s scope despite never being used again.
+- No `gc.collect()` between serial scorer runs — each scorer's garbage accumulated until Python's cyclic GC threshold was eventually hit.
+
+**Solution — `mf_base_scorer.py`:**
+- Delete `ratingsForTraining` immediately after creating `finalRoundRatings` (saves ~15 GB before the expensive tag threshold + diligence steps).
+- Delete `scoredNotes` (first version) and `helpfulnessScoresPreHarassmentFilter` after their last use in the post-harassment helpfulness score computation.
+- Delete `harassmentAbuseNoteParams` after its merge into `noteParams` in the diligence block.
+- Delete `noteParamsUnfiltered` and `raterParamsUnfiltered` at end of method.
+- In `compute_tag_thresholds_for_percentile`: delete `tagAggregates`, `scoredNotes`, `crhNotes`, `crhStats` and call `gc.collect()` before returning.
+- In `_score_notes_and_users` (final scoring path): delete `ratingsForTraining` after creating `finalRoundRatings`.
+- All deletions gated on `not self._saveIntermediateState` where the variable is conditionally saved to `self`.
+
+**Solution — `run_scoring.py`:**
+- `del cached` immediately after extracting values from the dev cache dict.
+- `del cachedRatings, cachedNoteTopics, cachedNoteTopicClassifierPipe` inside `run_prescoring`'s cache-hit branch after assigning to local variables.
+- `del prescoringNotesInput, prescoringRatingsInput, postSelectionSimilarityValues, cachedRatings, cachedNoteTopics, cachedNoteTopicClassifierPipe` + `gc.collect()` in `run_scoring` after prescoring returns.
+- Converted the serial scorer list comprehension in `_run_scorers` to a `for` loop with `gc.collect()` after each scorer completes.
+
