@@ -328,24 +328,23 @@ class PFlipPlusModel(object):
     # Compute cutoff that is guaranteed to include at least 5 ratings
     ratings = ratings[[c.noteIdKey, c.createdAtMillisKey]]
     cutoffByRatings = (
-      ratings.groupby(c.noteIdKey)
+      ratings.groupby(c.noteIdKey, as_index=False)
       .max()
-      .reset_index(drop=False)
       .rename(columns={c.createdAtMillisKey: "maxRatingMts"})
     )
     cutoffByRatings["maxRatingMts"] = cutoffByRatings["maxRatingMts"].astype(pd.Int64Dtype())
     nthRatings = (
       ratings.sort_values(c.createdAtMillisKey, ascending=True)
-      .groupby(c.noteIdKey)
+      .groupby(c.noteIdKey, as_index=False)
       .nth(minRatings - 1)
       .rename(columns={c.createdAtMillisKey: "nthRatingMts"})
     )
     nthRatings["nthRatingMts"] = nthRatings["nthRatingMts"].astype(pd.Int64Dtype())
-    cutoffByRatings = cutoffByRatings.merge(nthRatings, how="left")
+    cutoffByRatings = cutoffByRatings.merge(nthRatings, on=c.noteIdKey, how="left")
     cutoffByRatings["ratingMin"] = cutoffByRatings[["maxRatingMts", "nthRatingMts"]].min(axis=1)
     # Merge cutoffs by time and by ratings
     beforeMerge = len(scoringCutoff)
-    scoringCutoff = scoringCutoff.merge(cutoffByRatings[[c.noteIdKey, "ratingMin"]])
+    scoringCutoff = scoringCutoff.merge(cutoffByRatings[[c.noteIdKey, "ratingMin"]], how="left")
     assert len(scoringCutoff) == beforeMerge
     scoringCutoff[_SCORING_CUTOFF_MTS] = scoringCutoff[[_SCORING_CUTOFF_MTS, "ratingMin"]].max(
       axis=1
@@ -538,7 +537,8 @@ class PFlipPlusModel(object):
       .rename(columns={"count": "total"})
     )
     ratingTotals = notes[[c.noteIdKey]].merge(ratingTotals, how="left")
-    ratingTotals = ratingTotals.fillna({"total": 0}).astype(pd.Int64Dtype())
+    ratingTotals = ratingTotals.fillna({"total": 0})
+    ratingTotals["total"] = ratingTotals["total"].astype(np.int64)
     for cutoff in _RATING_TIME_BUCKETS:
       beforeCutoff = ratings[[c.noteIdKey, c.createdAtMillisKey]].rename(
         columns={c.createdAtMillisKey: "ratingCreationMts"}
@@ -556,7 +556,8 @@ class PFlipPlusModel(object):
         .rename(columns={"count": f"FIRST_{cutoff}_TOTAL"})
       )
       ratingTotals = ratingTotals.merge(cutoffCount, how="left").fillna(0)
-    ratingTotals = ratingTotals.astype(pd.Int64Dtype())
+    value_cols = [col for col in ratingTotals.columns if col != c.noteIdKey]
+    ratingTotals[value_cols] = ratingTotals[value_cols].astype(np.int64)
     for cutoff in _RATING_TIME_BUCKETS:
       ratingTotals[f"FIRST_{cutoff}_RATIO"] = ratingTotals[f"FIRST_{cutoff}_TOTAL"] / (
         ratingTotals["total"].clip(lower=1)
@@ -578,7 +579,8 @@ class PFlipPlusModel(object):
     )
     initialNotes = len(notes)
     ratingTotals = notes[[c.noteIdKey]].merge(ratingTotals, how="left")
-    ratingTotals = ratingTotals.fillna({"total": 0}).astype(pd.Int64Dtype())
+    ratingTotals = ratingTotals.fillna({"total": 0})
+    ratingTotals["total"] = ratingTotals["total"].astype(np.int64)
     for cutoff in _RATING_TIME_BUCKETS:
       ratingCounts = []
       for offset in range(cutoff):
@@ -590,18 +592,16 @@ class PFlipPlusModel(object):
           offsetRatings.value_counts()
           .to_frame()
           .reset_index(drop=False)[[c.noteIdKey, "count"]]
-          .groupby(c.noteIdKey)
+          .groupby(c.noteIdKey, as_index=False)
           .max()
-          .reset_index(drop=False)
         )
         ratingCounts.append(offsetRatings)
       ratingCounts = (
         pd.concat(ratingCounts)
-        .groupby(c.noteIdKey)
+        .groupby(c.noteIdKey, as_index=False)
         .max()
-        .reset_index(drop=False)
         .rename(columns={"count": f"BURST_{cutoff}_TOTAL"})
-      ).astype(pd.Int64Dtype())
+      )
       ratingTotals = ratingTotals.merge(ratingCounts, how="left").fillna(
         {f"BURST_{cutoff}_TOTAL": 0}
       )
@@ -652,7 +652,8 @@ class PFlipPlusModel(object):
       .rename(columns={"count": "total"})
     )
     ratingTotals = scoredNotes[[c.noteIdKey]].merge(ratingTotals, how="left")
-    ratingTotals = ratingTotals.fillna({"total": 0}).astype(pd.Int64Dtype())
+    ratingTotals = ratingTotals.fillna({"total": 0})
+    ratingTotals["total"] = ratingTotals["total"].astype(np.int64)
     for cutoff in _RATING_TIME_BUCKETS:
       afterCutoff = ratings[
         ratings[c.createdAtMillisKey] > (ratings["effectivePresent"] - (1000 * 60 * cutoff))
@@ -665,7 +666,8 @@ class PFlipPlusModel(object):
         .rename(columns={"count": f"RECENT_{cutoff}_TOTAL"})
       )
       ratingTotals = ratingTotals.merge(cutoffCount, how="left").fillna(0)
-    ratingTotals = ratingTotals.astype(pd.Int64Dtype())
+    value_cols = [col for col in ratingTotals.columns if col != c.noteIdKey]
+    ratingTotals[value_cols] = ratingTotals[value_cols].astype(np.int64)
     for cutoff in _RATING_TIME_BUCKETS:
       ratingTotals[f"RECENT_{cutoff}_RATIO"] = ratingTotals[f"RECENT_{cutoff}_TOTAL"] / (
         ratingTotals["total"].clip(lower=1)
@@ -689,9 +691,8 @@ class PFlipPlusModel(object):
     )
     helpfulnessRatings = (
       helpfulnessRatings[[c.noteIdKey, _USER_HELPFULNESS_RATINGS]]
-      .groupby(c.noteIdKey)
+      .groupby(c.noteIdKey, as_index=False)
       .agg(set)
-      .reset_index(drop=False)
     )
     helpfulnessRatings = notes.merge(helpfulnessRatings, how="left")
     helpfulnessRatings[_USER_HELPFULNESS_RATINGS] = helpfulnessRatings[
@@ -712,7 +713,7 @@ class PFlipPlusModel(object):
     tags = ratings[[c.noteIdKey] + c.helpfulTagsTSVOrder + c.notHelpfulTagsTSVOrder].copy()
     total_ratings = "total_ratings"
     tags[total_ratings] = 1
-    tags = tags.groupby(c.noteIdKey).sum().reset_index(drop=False)
+    tags = tags.groupby(c.noteIdKey, as_index=False).sum()
     tags[c.helpfulTagsTSVOrder + c.notHelpfulTagsTSVOrder] = tags[
       c.helpfulTagsTSVOrder + c.notHelpfulTagsTSVOrder
     ].divide(tags[total_ratings], axis=0)
@@ -745,9 +746,8 @@ class PFlipPlusModel(object):
     ]
     ratingTags = (
       ratingTags[[c.noteIdKey, outCol]]
-      .groupby(c.noteIdKey)
+      .groupby(c.noteIdKey, as_index=False)
       .agg(lambda x: set().union(*x))
-      .reset_index(drop=False)
     )
     ratingTags = notes[[c.noteIdKey]].merge(ratingTags, how="left")
     ratingTags[outCol] = ratingTags[outCol].apply(
@@ -777,14 +777,14 @@ class PFlipPlusModel(object):
       for rating in [c.helpfulValueTsv, c.somewhatHelpfulValueTsv, c.notHelpfulValueTsv]:
         summary[f"{viewpoint}_{rating}"] = summary[viewpoint].multiply(summary[rating])
     summary = summary[[c.noteIdKey] + _BUCKET_COUNT_COLS]
-    summary = summary.groupby(c.noteIdKey).sum().reset_index(drop=False)
+    summary = summary.groupby(c.noteIdKey, as_index=False).sum()
     summary[_BUCKET_COUNT_COLS] = summary[_BUCKET_COUNT_COLS].astype(np.float64)
     summary = (
       notes[[c.noteIdKey]]
       .merge(summary, on=c.noteIdKey, how="left")
       .fillna(0.0)
-      .astype(pd.Int64Dtype())
     )
+    summary[_BUCKET_COUNT_COLS] = summary[_BUCKET_COUNT_COLS].astype(np.int64)
     return summary
 
   def _get_helpful_rating_stats(self, notes: pd.DataFrame, ratings: pd.DataFrame) -> pd.DataFrame:
@@ -806,9 +806,8 @@ class PFlipPlusModel(object):
     # Compute rating stats
     maxPosHelpful = (
       ratings[ratings[_RATER_FACTOR] > 0]
-      .groupby(c.noteIdKey)
+      .groupby(c.noteIdKey, as_index=False)
       .max()
-      .reset_index()
       .rename(columns={_RATER_FACTOR: _MAX_POS_HELPFUL})
     )
     maxNegHelpful = (
@@ -821,9 +820,8 @@ class PFlipPlusModel(object):
     )
     meanPosHelpful = (
       ratings[ratings[_RATER_FACTOR] > 0]
-      .groupby(c.noteIdKey)
+      .groupby(c.noteIdKey, as_index=False)
       .mean()
-      .reset_index()
       .rename(columns={_RATER_FACTOR: _MEAN_POS_HELPFUL})
     )
     meanNegHelpful = (
@@ -835,7 +833,7 @@ class PFlipPlusModel(object):
       .rename(columns={_RATER_FACTOR: _MEAN_NEG_HELPFUL})
     )
     stdHelpful = (
-      ratings.groupby(c.noteIdKey).std().reset_index().rename(columns={_RATER_FACTOR: _STD_HELPFUL})
+      ratings.groupby(c.noteIdKey, as_index=False).std().rename(columns={_RATER_FACTOR: _STD_HELPFUL})
     )
     # Compile into features per-note
     notes = notes[[c.noteIdKey]].merge(maxPosHelpful, on=c.noteIdKey, how="left")
@@ -987,7 +985,7 @@ class PFlipPlusModel(object):
       .reset_index(drop=False)
       .rename(columns={"count": _TOTAL_PEER_CRH_NOTES})
     )
-    return (
+    peerStats = (
       scoredNotes[[c.noteIdKey]]
       .merge(totalPeerNotes, how="left")
       .merge(totalPeerMisleadingNotes, how="left")
@@ -995,8 +993,11 @@ class PFlipPlusModel(object):
       .merge(totalPeerStabilizationNotes, how="left")
       .merge(totalPeerCrhNotes, how="left")
       .fillna(0)
-      .astype(pd.Int64Dtype())
     )
+    peer_cols = [_TOTAL_PEER_NOTES, _TOTAL_PEER_MISLEADING_NOTES, _TOTAL_PEER_NON_MISLEADING_NOTES,
+                 _TOTAL_PEER_STABILIZATION_NOTES, _TOTAL_PEER_CRH_NOTES]
+    peerStats[peer_cols] = peerStats[peer_cols].astype(np.int64)
+    return peerStats
 
   def _prepare_note_info(
     self,
@@ -1651,7 +1652,7 @@ class PFlipPlusModel(object):
     tweetIds = notes[[c.tweetIdKey]].drop_duplicates()
     tweetIds = tweetIds[tweetIds[c.tweetIdKey] != "-1"]
     # Iterate through batches
-    results = [pd.DataFrame({c.noteIdKey: [], LABEL: []})]
+    results = [pd.DataFrame({c.noteIdKey: pd.array([], dtype=np.int64), LABEL: pd.array([], dtype=object)})]
     start = 0
     while start < len(tweetIds):
       logger.info(f"processing prediction batch: {start}")

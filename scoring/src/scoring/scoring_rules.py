@@ -646,7 +646,7 @@ class PopulationSampledIntercept(ScoringRule):
         f"PopulationSampledIntercept rule skipped: {c.coreNoteInterceptPopulationSampledKey} column not present (not enough core model context)"
       )
       # Return empty updates - rule doesn't apply in this context
-      return (pd.DataFrame({c.noteIdKey: [], statusColumn: []}), None)
+      return (pd.DataFrame({c.noteIdKey: pd.array([], dtype=np.int64), statusColumn: pd.array([], dtype=object)}), None)
 
     # Require per-sign population sampled counts from core model
     if not (
@@ -656,7 +656,7 @@ class PopulationSampledIntercept(ScoringRule):
       logger.info(
         "PopulationSampledIntercept rule skipped: core per-sign population sampled rating counts not present"
       )
-      return (pd.DataFrame({c.noteIdKey: [], statusColumn: []}), None)
+      return (pd.DataFrame({c.noteIdKey: pd.array([], dtype=np.int64), statusColumn: pd.array([], dtype=object)}), None)
 
     # Only apply to notes on track for CRH
     candidateNotes = currentLabels[currentLabels[statusColumn] == c.currentlyRatedHelpful][
