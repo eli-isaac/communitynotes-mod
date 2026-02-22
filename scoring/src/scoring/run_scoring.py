@@ -1345,19 +1345,18 @@ def run_prescoring(
     logger.info(get_df_info(userEnrollment, "userEnrollment"))
     logger.info(get_df_info(prescoringNoteModelOutput, "prescoringNoteModelOutput"))
     logger.info(get_df_info(prescoringRaterModelOutput, "prescoringRaterModelOutput"))
-  # Restore IDs as string objects now that prescoring is over and memory pressure is relaxed.
+  # Restore IDs from nullable Int64 back to int64 to match the runner's factorized IDs.
   if conversion:
-    logger.info("Restoring string IDs.")
-    ratings[c.raterParticipantIdKey] = ratings[c.raterParticipantIdKey].astype(str)
+    logger.info("Restoring int64 IDs from Int64.")
+    ratings[c.raterParticipantIdKey] = ratings[c.raterParticipantIdKey].astype(np.int64)
     noteStatusHistory[c.noteAuthorParticipantIdKey] = noteStatusHistory[
       c.noteAuthorParticipantIdKey
-    ].astype(str)
-    userEnrollment[c.participantIdKey] = userEnrollment[c.participantIdKey].astype(str)
-    # Notice that we also do conversion on the prescoring results.
+    ].astype(np.int64)
+    userEnrollment[c.participantIdKey] = userEnrollment[c.participantIdKey].astype(np.int64)
     prescoringRaterModelOutput[c.raterParticipantIdKey] = prescoringRaterModelOutput[
       c.raterParticipantIdKey
-    ].astype(str)
-    logger.info("Restoration of original string IDs complete.")
+    ].astype(np.int64)
+    logger.info("Restoration of int64 IDs complete.")
 
   with c.time_block("Logging Prescoring Results RAM usage (after conversion)"):
     logger.info(get_df_info(notes, "notes"))
