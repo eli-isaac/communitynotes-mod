@@ -1370,6 +1370,7 @@ def run_prescoring(
     [prescoringRaterModelOutput, postSelectionSimilarityValues],
     unsafeAllowed={
       c.postSelectionValueKey,
+      c.quasiCliqueValueKey,
     },
   )
   with c.time_block("Logging Prescoring Results RAM usage (after concatenation)"):

@@ -332,16 +332,16 @@ class PFlipPlusModel(object):
       .max()
       .reset_index(drop=False)
       .rename(columns={c.createdAtMillisKey: "maxRatingMts"})
-      .astype(pd.Int64Dtype())
     )
-    cutoffByRatings = cutoffByRatings.merge(
+    cutoffByRatings["maxRatingMts"] = cutoffByRatings["maxRatingMts"].astype(pd.Int64Dtype())
+    nthRatings = (
       ratings.sort_values(c.createdAtMillisKey, ascending=True)
       .groupby(c.noteIdKey)
       .nth(minRatings - 1)
       .rename(columns={c.createdAtMillisKey: "nthRatingMts"})
-      .astype(pd.Int64Dtype()),
-      how="left",
     )
+    nthRatings["nthRatingMts"] = nthRatings["nthRatingMts"].astype(pd.Int64Dtype())
+    cutoffByRatings = cutoffByRatings.merge(nthRatings, how="left")
     cutoffByRatings["ratingMin"] = cutoffByRatings[["maxRatingMts", "nthRatingMts"]].min(axis=1)
     # Merge cutoffs by time and by ratings
     beforeMerge = len(scoringCutoff)
@@ -1034,6 +1034,7 @@ class PFlipPlusModel(object):
     noteStatusHistory[c.createdAtMillisKey] = noteStatusHistory[c.createdAtMillisKey].astype(
       pd.Int64Dtype()
     )
+    notes[c.createdAtMillisKey] = notes[c.createdAtMillisKey].astype(pd.Int64Dtype())
 
     # Prep notes
     scoredNotes = self._get_notes(notes, noteStatusHistory)
