@@ -57,7 +57,7 @@ finalNotesNmrDueToMinStableCrhTimeMaxNewCrhChurn = 1.0
 # Data Filenames
 scoredNotesOutputPath = "scoredNotes.tsv"
 enrollmentInputPath = "userEnrollment-00000.tsv"
-notesInputPath = "notes-00000.tsv"
+notesInputPath = "notes"
 ratingsInputPath = "ratings"
 noteStatusHistoryInputPath = "noteStatusHistory-00000.tsv"
 

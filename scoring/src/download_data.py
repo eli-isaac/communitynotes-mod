@@ -70,7 +70,6 @@ def download_data(date: str, num_ratings_files: int = 20) -> None:
 
     # Main data files (served as .zip; we extract to get .tsv)
     zip_urls = [
-        f"{BASE_URL}/{date}/notes/notes-00000.zip",
         f"{BASE_URL}/{date}/noteStatusHistory/noteStatusHistory-00000.zip",
         f"{BASE_URL}/{date}/userEnrollment/userEnrollment-00000.zip",
     ]
@@ -83,6 +82,20 @@ def download_data(date: str, num_ratings_files: int = 20) -> None:
         print(f"  Downloading {filename}...")
         if download_file(url, destination):
             extract_zip_to_dir(destination, output_dir)
+            print(f"    Extracted {filename}")
+
+    # Download notes files into notes/ subdirectory (multiple shards)
+    notes_dir = output_dir / "notes"
+    notes_dir.mkdir(exist_ok=True)
+    notes_urls = [
+        f"{BASE_URL}/{date}/notes/notes-0000{i}.zip" for i in range(2)
+    ]
+    for url in notes_urls:
+        filename = url.split("/")[-1]
+        destination = notes_dir / filename
+        print(f"  Downloading {filename}...")
+        if download_file(url, destination):
+            extract_zip_to_dir(destination, notes_dir)
             print(f"    Extracted {filename}")
 
     # Create ratings subdirectory
