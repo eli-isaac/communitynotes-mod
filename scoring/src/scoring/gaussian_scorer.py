@@ -422,17 +422,19 @@ class GaussianScorer(Scorer):
     self, scoredNotes, raterParams, ratings
   ) -> Dict[str, float]:
     with c.time_block(f"{self.get_name()}: Compute tag thresholds for percentiles"):
-      # Compute tag aggregates (in the same way as is done in final scoring in note_ratings.compute_scored_notes)
       tagAggregates = tag_filter.get_note_tag_aggregates(ratings, scoredNotes, raterParams)
       assert len(tagAggregates) == len(
         scoredNotes
       ), "There should be one aggregate per scored note."
       scoredNotes = tagAggregates.merge(scoredNotes, on=c.noteIdKey, how="outer")
+      del tagAggregates
 
-      # Compute percentile thresholds for each tag
       crhNotes = scoredNotes[scoredNotes[c.currentlyRatedHelpfulBoolKey]][[c.noteIdKey]]
       crhStats = scoredNotes.merge(crhNotes, on=c.noteIdKey, how="inner")
+      del scoredNotes, crhNotes
       thresholds = tag_filter.get_tag_thresholds(crhStats, self._tagFilterPercentile)
+      del crhStats
+      gc.collect()
     return thresholds
 
   def _prescore_notes_and_users(

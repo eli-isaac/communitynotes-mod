@@ -500,3 +500,26 @@ After converting participant IDs from strings to dense `int64` via `pd.factorize
 - **`mf_base_scorer.py`** — `score_final()` overrides the base class but did not catch `EmptyRatingException` from any of its four `_score_notes_and_users()` calls (no-high-vol, no-correlated, population-sampled, and main scoring). When a scorer like `MFGroupScorer_12` has very few ratings and the population-sampled subset filters to zero after helpfulness scoring, the uncaught exception crashed the run. Wrapped all four calls in `try/except EmptyRatingException`, using empty DataFrames for subsidiary calls and `_return_empty_final_scores()` for the main call.
 - **`gaussian_scorer.py`** — Same fix: `score_final()` has the identical four unprotected `_score_notes_and_users()` calls. Added `try/except EmptyRatingException` around all four.
 
+---
+
+## 17. Reduce peak memory for full-dataset scoring runs
+
+**Date:** 2026-02-21
+
+Running with the complete (unsampled) dataset caused the process to be OOM-killed during MFExpansionScorer's prescoring. The kill occurred right after `Compute tag thresholds for percentiles`, when accumulated scorer results plus the full ratings DataFrame exceeded available RAM.
+
+**Root causes:**
+1. Every prescoring `ModelResult` included `auxiliaryNoteInfo` (up to ~700 MB for MFCoreScorer with ~34 columns × 2.7M notes), even though `combine_prescorer_scorer_results` never reads that field.
+2. Six rating-TSV columns (`ratedOnTweetId`, `version`, `helpful`, `notHelpful`, `agree`, `disagree`) are loaded from disk but never referenced during scoring — wasting ~2.3 GB at 190M rows.
+3. Inside `_prescore_notes_and_users`, `scoredNotes` (the second compute_scored_notes result, ~200-400 MB) and `finalRoundRatings` lingered in scope long after their last use, holding memory during the rater-model-output merge chain.
+4. `gaussian_scorer.compute_tag_thresholds_for_percentile` did not free intermediate DataFrames (`tagAggregates`, `crhNotes`, `crhStats`), unlike the `mf_base_scorer` version.
+
+**Fixes:**
+
+- **`scorer.py`** — `prescore()`: set `auxiliaryNoteInfo=None` (unused during prescoring). Also `del noteScores, userScores` immediately after creating the reindexed output DataFrames, so the originals are freed before the `ModelResult` is returned.
+- **`runner.py`** — Drop unused rating columns (`ratedOnTweetId`, `version`, `helpful`, `notHelpful`, `agree`, `disagree`) from the ratings DataFrame before invoking `run_scoring`. These columns are consumed during data loading/processing but never used in any scorer.
+- **`mf_base_scorer.py`** — `_prescore_notes_and_users()`: `del scoredNotes, finalRoundRatings` + `gc.collect()` right after the meta-output block (tag thresholds + final-round stats), instead of at end-of-function. Also `del raterParams, helpfulnessScores, userIncorrectTagUsageDf` after building `raterModelOutput`.
+- **`gaussian_scorer.py`** — `compute_tag_thresholds_for_percentile()`: added `del tagAggregates`, `del scoredNotes, crhNotes`, `del crhStats`, and `gc.collect()` to match the already-optimized `mf_base_scorer` version.
+
+**Estimated savings:** ~3-4 GB peak reduction (column drops + auxiliaryNoteInfo + earlier intermediate cleanup).
+

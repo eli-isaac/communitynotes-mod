@@ -269,6 +269,17 @@ def _run_scorer(
       "previousAuxiliaryNoteInfo": previousAuxiliaryNoteInfo,
     })
 
+  # Drop columns that were needed for data loading/processing but are never used in scoring.
+  unused_rating_cols = [
+    col for col in [
+      c.ratedOnTweetIdKey, c.versionKey, c.helpfulKey, c.notHelpfulKey,
+      c.agreeKey, c.disagreeKey,
+    ] if col in ratings.columns
+  ]
+  if unused_rating_cols:
+    ratings.drop(columns=unused_rating_cols, inplace=True)
+    logger.info(f"Dropped unused rating columns to save memory: {unused_rating_cols}")
+
   # Invoke scoring and user contribution algorithms.
   scoredNotes, helpfulnessScores, newStatus, auxNoteInfo = run_scoring(
     args,

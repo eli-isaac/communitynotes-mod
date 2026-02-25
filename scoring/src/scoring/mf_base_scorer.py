@@ -1001,6 +1001,9 @@ class MFBaseScorer(Scorer):
       finalRoundNumUsers=finalRoundRatings[c.raterParticipantIdKey].nunique(),
     )
 
+    del scoredNotes, finalRoundRatings
+    gc.collect()
+
     # Compute user incorrect tag aggregates
     userIncorrectTagUsageDf = get_user_incorrect_ratio(
       ratings[
@@ -1057,10 +1060,8 @@ class MFBaseScorer(Scorer):
     )
 
     noteModelOutput = noteParams
-    del ratings
-    del finalRoundRatings
-    del noteParamsUnfiltered
-    del raterParamsUnfiltered
+    del ratings, noteParamsUnfiltered, raterParamsUnfiltered
+    del noteParams, raterParams, helpfulnessScores, userIncorrectTagUsageDf
     gc.collect()
     return noteModelOutput, raterModelOutput, metaOutput
 

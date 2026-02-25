@@ -349,16 +349,17 @@ class Scorer(ABC):
     gc.collect()
     # Return dataframes with specified columns in specified order
     # Reindex fills required columns with NaN if they aren't present in the original df.
+    scoredNotes = noteScores.reindex(
+      columns=c.prescoringNoteModelOutputTSVColumns, fill_value=np.nan
+    )
+    helpfulnessScores = userScores.reindex(
+      columns=c.prescoringRaterModelOutputTSVColumns, fill_value=np.nan
+    )
+    del noteScores, userScores
     return ModelResult(
-      scoredNotes=noteScores.reindex(
-        columns=c.prescoringNoteModelOutputTSVColumns, fill_value=np.nan
-      ),
-      helpfulnessScores=userScores.reindex(
-        columns=c.prescoringRaterModelOutputTSVColumns, fill_value=np.nan
-      ),
-      auxiliaryNoteInfo=noteScores.reindex(
-        columns=self.get_auxiliary_note_info_cols(), fill_value=np.nan
-      ),
+      scoredNotes=scoredNotes,
+      helpfulnessScores=helpfulnessScores,
+      auxiliaryNoteInfo=None,
       scorerName=self.get_name(),
       metaScores=metaScores,
     )
