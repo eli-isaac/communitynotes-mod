@@ -510,14 +510,14 @@ Running with the complete (unsampled) dataset caused the process to be OOM-kille
 
 **Root causes:**
 1. Every prescoring `ModelResult` included `auxiliaryNoteInfo` (up to ~700 MB for MFCoreScorer with ~34 columns × 2.7M notes), even though `combine_prescorer_scorer_results` never reads that field.
-2. Six rating-TSV columns (`ratedOnTweetId`, `version`, `helpful`, `notHelpful`, `agree`, `disagree`) are loaded from disk but never referenced during scoring — wasting ~2.3 GB at 190M rows.
+2. Four rating-TSV columns (`ratedOnTweetId`, `version`, `agree`, `disagree`) are loaded from disk but never referenced during scoring — wasting ~1.9 GB at 190M rows. (`helpful` and `notHelpful` cannot be dropped because `preprocess_data` is called again during final scoring's pflip path.)
 3. Inside `_prescore_notes_and_users`, `scoredNotes` (the second compute_scored_notes result, ~200-400 MB) and `finalRoundRatings` lingered in scope long after their last use, holding memory during the rater-model-output merge chain.
 4. `gaussian_scorer.compute_tag_thresholds_for_percentile` did not free intermediate DataFrames (`tagAggregates`, `crhNotes`, `crhStats`), unlike the `mf_base_scorer` version.
 
 **Fixes:**
 
 - **`scorer.py`** — `prescore()`: set `auxiliaryNoteInfo=None` (unused during prescoring). Also `del noteScores, userScores` immediately after creating the reindexed output DataFrames, so the originals are freed before the `ModelResult` is returned.
-- **`runner.py`** — Drop unused rating columns (`ratedOnTweetId`, `version`, `helpful`, `notHelpful`, `agree`, `disagree`) from the ratings DataFrame before invoking `run_scoring`. These columns are consumed during data loading/processing but never used in any scorer.
+- **`runner.py`** — Drop unused rating columns (`ratedOnTweetId`, `version`, `agree`, `disagree`) from the ratings DataFrame before invoking `run_scoring`. These columns are consumed during data loading/processing but never used in any scorer. (`helpful` and `notHelpful` are kept because `preprocess_data` re-reads them during final scoring.)
 - **`mf_base_scorer.py`** — `_prescore_notes_and_users()`: `del scoredNotes, finalRoundRatings` + `gc.collect()` right after the meta-output block (tag thresholds + final-round stats), instead of at end-of-function. Also `del raterParams, helpfulnessScores, userIncorrectTagUsageDf` after building `raterModelOutput`.
 - **`gaussian_scorer.py`** — `compute_tag_thresholds_for_percentile()`: added `del tagAggregates`, `del scoredNotes, crhNotes`, `del crhStats`, and `gc.collect()` to match the already-optimized `mf_base_scorer` version.
 

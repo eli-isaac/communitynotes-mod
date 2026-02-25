@@ -270,9 +270,11 @@ def _run_scorer(
     })
 
   # Drop columns that were needed for data loading/processing but are never used in scoring.
+  # Note: helpfulKey and notHelpfulKey are NOT safe to drop — preprocess_data is called
+  # again during final scoring (pflip) and needs them to recompute helpfulNum.
   unused_rating_cols = [
     col for col in [
-      c.ratedOnTweetIdKey, c.versionKey, c.helpfulKey, c.notHelpfulKey,
+      c.ratedOnTweetIdKey, c.versionKey,
       c.agreeKey, c.disagreeKey,
     ] if col in ratings.columns
   ]
