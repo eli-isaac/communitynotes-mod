@@ -523,3 +523,26 @@ Running with the complete (unsampled) dataset caused the process to be OOM-kille
 
 **Estimated savings:** ~3-4 GB peak reduction (column drops + auxiliaryNoteInfo + earlier intermediate cleanup).
 
+---
+
+## 18. Skip redundant full-pipeline work for subsidiary intercept-only scoring calls
+
+**Date:** 2026-02-21
+
+The process was OOM-killed during final scoring at 229 GB RSS (on a 200 GB machine). `dmesg` confirmed it: `Out of memory: Killed process ... anon-rss:229626692kB`.
+
+**Root cause:** `score_final()` calls `_score_notes_and_users()` **four** times per scorer — once each for no-high-vol, no-correlated, population-sampled, and main scoring. Each subsidiary call (first three) runs the **full** scoring pipeline: MF, pseudoraters, diligence model, `compute_scored_notes` (which does tag aggregation on 84M ratings, incorrect-filter aggregation, and scoring rules). However, these subsidiary calls only use a single column from the result — `internalNoteIntercept` — and discard everything else (tag aggregates, scored notes, helpfulness scores, diligence parameters).
+
+With 84M ratings per call, `compute_scored_notes` alone allocates ~40-50 GB of intermediate DataFrames per call. Python's glibc allocator does not return freed pages to the OS, so the RSS grows cumulatively across the four calls: 4 × 50 GB ≈ 200+ GB even though live memory at any point is only ~50 GB.
+
+**Fix — `interceptOnly` flag:**
+
+- **`mf_base_scorer.py`** — Added `interceptOnly: bool = False` parameter to `_score_notes_and_users()`. When `True`, the method returns `noteParams[[noteId, internalNoteIntercept]]` immediately after the MF run, skipping pseudoraters, diligence model, `compute_scored_notes`, tag aggregation, incorrect filtering, scoring rules, and helpfulness score computation. The three subsidiary calls in `score_final()` now pass `interceptOnly=True`.
+- **`gaussian_scorer.py`** — Same change: added `interceptOnly` parameter to `_score_notes_and_users()` with early return after gaussian scoring. Three subsidiary calls in `score_final()` updated.
+
+**Fix — `malloc_trim` to release pages:**
+
+- **`mf_base_scorer.py`** — Added `_release_memory()` helper that calls `gc.collect()` followed by `ctypes.CDLL("libc.so.6").malloc_trim(0)` to force glibc to return freed pages to the OS. Called between each subsidiary scoring call and before the main scoring call. This prevents RSS from growing cumulatively.
+
+**Estimated savings:** Each subsidiary call now uses ~5-10 GB instead of ~50 GB. Combined with `malloc_trim`, peak RSS during final scoring should drop from ~230 GB to ~60-70 GB.
+

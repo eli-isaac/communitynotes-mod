@@ -1,3 +1,4 @@
+import ctypes
 import gc
 import logging
 from typing import Dict, List, Optional, Set, Tuple
@@ -27,6 +28,15 @@ import torch
 
 logger = logging.getLogger("birdwatch.mf_base_scorer")
 logger.setLevel(logging.INFO)
+
+
+def _release_memory():
+  """gc.collect() + malloc_trim to return freed pages to the OS."""
+  gc.collect()
+  try:
+    ctypes.CDLL("libc.so.6").malloc_trim(0)
+  except OSError:
+    pass
 
 
 def coalesce_columns(df: pd.DataFrame, columnPrefix: str) -> pd.DataFrame:
@@ -1077,6 +1087,7 @@ class MFBaseScorer(Scorer):
     noteScoresNoCorrelated: Optional[pd.DataFrame] = None,
     noteScoresPopulationSampled: Optional[pd.DataFrame] = None,
     ratingPerNoteLossRatio: Optional[float] = None,
+    interceptOnly: bool = False,
   ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Run the "final" matrix factorization scoring algorithm.
     Accepts prescoring's output as its input, as well as the new ratings and note status history.
@@ -1175,7 +1186,12 @@ class MFBaseScorer(Scorer):
       self.raterParams = raterParams
       self.globalBias = globalBias
       self.finalRoundRatings = finalRoundRatings
-    # self.assert_train_error_is_below_threshold(finalRoundRatings, self._maxFinalMFTrainError)
+
+    if interceptOnly:
+      result = noteParams[[c.noteIdKey, c.internalNoteInterceptKey]]
+      del noteParams, raterParams, finalRoundRatings
+      _release_memory()
+      return result, pd.DataFrame()
 
     # Add pseudo-raters with the most extreme parameters and re-score notes, to estimate
     #  upper and lower confidence bounds on note parameters.
@@ -1364,6 +1380,7 @@ class MFBaseScorer(Scorer):
         prescoringNoteModelOutput=prescoringNoteModelOutput,
         prescoringRaterModelOutput=prescoringRaterModelOutput,
         prescoringMetaScorerOutput=prescoringMetaScorerOutput,
+        interceptOnly=True,
       )
     except EmptyRatingException:
       logger.info(f"EmptyRatingException in no-high-vol scoring for {self.get_name()}")
@@ -1383,6 +1400,8 @@ class MFBaseScorer(Scorer):
       noteScoresNoHighVol[c.noteIdKey] = []
       noteScoresNoHighVol[c.internalNoteInterceptNoHighVolKey] = []
 
+    _release_memory()
+
     # Separate correlated ratings. Note that we rely on the ratings dataframe being sorted and
     # partition the sorted dataframe to avoid creating a copy of ratings.
     lowVolAndUncorrelated = lowVolCount - ratings[c.correlatedRaterKey].iloc[:lowVolCount].sum()
@@ -1399,7 +1418,7 @@ class MFBaseScorer(Scorer):
       len(uncorrelatedRatings) == totalUncorrelatedRatings
     ), f"Unexpected mismatch ({len(uncorrelatedRatings)}, {totalUncorrelatedRatings})"
     assert uncorrelatedRatings[c.correlatedRaterKey].sum() == 0
-    gc.collect()
+    _release_memory()
     logger.info(
       f"Total Ratings vs Non-Correlated Ratings ({self.get_name()}): {len(ratings)} vs {totalUncorrelatedRatings}"
     )
@@ -1410,6 +1429,7 @@ class MFBaseScorer(Scorer):
         prescoringNoteModelOutput=prescoringNoteModelOutput,
         prescoringRaterModelOutput=prescoringRaterModelOutput,
         prescoringMetaScorerOutput=prescoringMetaScorerOutput,
+        interceptOnly=True,
       )
     except EmptyRatingException:
       logger.info(f"EmptyRatingException in no-correlated scoring for {self.get_name()}")
@@ -1451,6 +1471,7 @@ class MFBaseScorer(Scorer):
           prescoringRaterModelOutput=prescoringRaterModelOutput,
           prescoringMetaScorerOutput=prescoringMetaScorerOutput,
           ratingPerNoteLossRatio=self._populationSampledRatingPerNoteLossRatio,
+          interceptOnly=True,
         )
       except EmptyRatingException:
         logger.info(f"EmptyRatingException in population-sampled scoring for {self.get_name()}")
@@ -1481,6 +1502,7 @@ class MFBaseScorer(Scorer):
       )
       noteScoresPopulationSampled = None
 
+    _release_memory()
     try:
       noteScores, userScores = self._score_notes_and_users(
         ratings=ratings,

@@ -458,6 +458,7 @@ class GaussianScorer(Scorer):
     noteScoresNoCorrelated: Optional[pd.DataFrame] = None,
     noteScoresPopulationSampled: Optional[pd.DataFrame] = None,
     ratingPerNoteLossRatio: Optional[float] = None,
+    interceptOnly: bool = False,
   ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Run the "final" matrix factorization scoring algorithm.
     Accepts prescoring's output as its input, as well as the new ratings and note status history.
@@ -589,6 +590,12 @@ class GaussianScorer(Scorer):
       self.noteParams = noteParams
       self.raterParams = raterParams
       self.finalRoundRatings = finalRoundRatings
+
+    if interceptOnly:
+      result = noteParams[[c.noteIdKey, c.internalNoteInterceptKey]]
+      del noteParams, raterParams, finalRoundRatings, ratingsForTraining
+      gc.collect()
+      return result, pd.DataFrame()
 
     for col in c.noteParameterUncertaintyTSVColumns:
       noteParams[col] = np.nan
@@ -757,6 +764,7 @@ class GaussianScorer(Scorer):
         prescoringNoteModelOutput=prescoringNoteModelOutput,
         prescoringRaterModelOutput=prescoringRaterModelOutput,
         prescoringMetaScorerOutput=prescoringMetaScorerOutput,
+        interceptOnly=True,
       )
     except EmptyRatingException:
       logger.info(f"EmptyRatingException in no-high-vol scoring for {self.get_name()}")
@@ -775,6 +783,8 @@ class GaussianScorer(Scorer):
       logger.info(f"Imputing expected columns ({self.get_name()})")
       noteScoresNoHighVol[c.noteIdKey] = []
       noteScoresNoHighVol[c.internalNoteInterceptNoHighVolKey] = []
+
+    gc.collect()
 
     # Separate correlated ratings. Note that we rely on the ratings dataframe being sorted and
     # partition the sorted dataframe to avoid creating a copy of ratings.
@@ -803,6 +813,7 @@ class GaussianScorer(Scorer):
         prescoringNoteModelOutput=prescoringNoteModelOutput,
         prescoringRaterModelOutput=prescoringRaterModelOutput,
         prescoringMetaScorerOutput=prescoringMetaScorerOutput,
+        interceptOnly=True,
       )
     except EmptyRatingException:
       logger.info(f"EmptyRatingException in no-correlated scoring for {self.get_name()}")
@@ -844,6 +855,7 @@ class GaussianScorer(Scorer):
           prescoringRaterModelOutput=prescoringRaterModelOutput,
           prescoringMetaScorerOutput=prescoringMetaScorerOutput,
           ratingPerNoteLossRatio=self._populationSampledRatingPerNoteLossRatio,
+          interceptOnly=True,
         )
       except EmptyRatingException:
         logger.info(f"EmptyRatingException in population-sampled scoring for {self.get_name()}")
@@ -874,6 +886,7 @@ class GaussianScorer(Scorer):
       )
       noteScoresPopulationSampled = None
 
+    gc.collect()
     try:
       noteScores, userScores = self._score_notes_and_users(
         ratings=ratings,
