@@ -1222,6 +1222,55 @@ def run_prescoring(
   c.PrescoringMetaOutput,
   pd.DataFrame,
 ]:
+  """Run the prescoring phase: topic assignment, post-selection similarity filtering, and all
+  scorer prescore() calls.  Produces the model outputs and classifiers that final scoring needs.
+
+  Steps performed:
+    1. Train a topic classifier on note text and assign topics to notes.
+    2. Filter ratings by post-selection similarity (PSS).
+    3. Instantiate all enabled scorers and run their prescore() methods, which fit
+       matrix-factorization (or gaussian) models on the full rating set to produce
+       initial note and rater parameters.
+    4. Combine prescorer results into unified note/rater model-output DataFrames.
+    5. Train a PFlip+ classifier to detect note-flipping behavior.
+    6. Optionally run a "check-flips" final-scoring pass on a subset of notes.
+
+  Args:
+    args: Parsed command-line arguments forwarded to scorers and data loaders.
+    notes: One row per note with note metadata (noteId, text, creation time, etc.).
+    ratings: One row per rating with rater/note IDs, helpfulness label, and tags.
+    noteStatusHistory: One row per note with the history of status changes.
+    userEnrollment: One row per contributor with enrollment state and modeling group.
+    postSelectionSimilarityValues: Per-rater similarity scores from rater clustering,
+      used to filter out post-selection-biased ratings.
+    seed: If not None, base distinct seeds for MF rounds on this value.
+    enabledScorers: Subset of scorers to instantiate.  None means all.
+    runParallel: If True, run scorer prescore() calls in parallel via ProcessPoolExecutor.
+    dataLoader: DataLoader forwarded to parallel workers for shared-memory access.
+    useStableInitialization: If True, initialize MF from previous prescoring output.
+    pseudoraters: If True, compute pseudorater confidence bounds during prescoring.
+    checkFlips: If True, run a final-scoring pass on recently changed notes to detect flips.
+    enableNmrDueToMinStableCrhTime: If True, enforce minimum stable CRH time rule.
+    previousRatingCutoffTimestampMillis: Cutoff for determining which notes to rescore.
+    maxWorkers: Cap on parallel workers (defaults to number of scorers).
+
+  Returns:
+    Tuple of six values:
+      prescoringNoteModelOutput (pd.DataFrame): One row per (note, scorer) with columns for
+        note intercept, factor, and rating counts (prescoringNoteModelOutputTSVColumns).
+      prescoringRaterModelOutput (pd.DataFrame): One row per (rater, scorer) with columns for
+        rater intercept, factor, helpfulness threshold, and tag-usage stats
+        (prescoringRaterModelOutputTSVColumns).
+      noteTopicClassifier (sklearn.pipeline.Pipeline): Trained text classifier that maps
+        note text to topic labels.  Forwarded to final scoring for topic-based scorers.
+      pflipClassifier (PFlipPlusModel): Trained classifier for predicting note-flip
+        probability.  Used during final scoring's stabilization pass.
+      prescoringMetaOutput (PrescoringMetaOutput): Per-scorer metadata including global
+        intercept, tag-filter thresholds, helpfulness thresholds, and final-round
+        counts (notes/ratings/users) needed to configure final scoring's MF runs.
+      prescoringScoredNotes (pd.DataFrame | None): If checkFlips is True, scored notes
+        from a preliminary final-scoring pass on a subset of notes; otherwise None.
+  """
   logger.info("logging environment variables")
   for k, v in os.environ.items():
     print(f"{k}: {v}")
