@@ -1,3 +1,4 @@
+import ctypes
 import gc
 import logging
 from typing import Dict, List, Optional, Set, Tuple
@@ -13,6 +14,15 @@ import torch
 
 
 logger = logging.getLogger("birdwatch.mf_base_scorer")
+
+
+def _release_memory():
+  """gc.collect() + malloc_trim to return freed pages to the OS."""
+  gc.collect()
+  try:
+    ctypes.CDLL("libc.so.6").malloc_trim(0)
+  except OSError:
+    pass
 logger.setLevel(logging.INFO)
 
 
@@ -434,7 +444,7 @@ class GaussianScorer(Scorer):
       del scoredNotes, crhNotes
       thresholds = tag_filter.get_tag_thresholds(crhStats, self._tagFilterPercentile)
       del crhStats
-      gc.collect()
+      _release_memory()
     return thresholds
 
   def _prescore_notes_and_users(
@@ -594,7 +604,7 @@ class GaussianScorer(Scorer):
     if interceptOnly:
       result = noteParams[[c.noteIdKey, c.internalNoteInterceptKey]]
       del noteParams, raterParams, finalRoundRatings, ratingsForTraining
-      gc.collect()
+      _release_memory()
       return result, pd.DataFrame()
 
     for col in c.noteParameterUncertaintyTSVColumns:
@@ -784,7 +794,7 @@ class GaussianScorer(Scorer):
       noteScoresNoHighVol[c.noteIdKey] = []
       noteScoresNoHighVol[c.internalNoteInterceptNoHighVolKey] = []
 
-    gc.collect()
+    _release_memory()
 
     # Separate correlated ratings. Note that we rely on the ratings dataframe being sorted and
     # partition the sorted dataframe to avoid creating a copy of ratings.
@@ -802,7 +812,7 @@ class GaussianScorer(Scorer):
       len(uncorrelatedRatings) == totalUncorrelatedRatings
     ), f"Unexpected mismatch ({len(uncorrelatedRatings)}, {totalUncorrelatedRatings})"
     assert uncorrelatedRatings[c.correlatedRaterKey].sum() == 0
-    gc.collect()
+    _release_memory()
     logger.info(
       f"Total Ratings vs Non-Correlated Ratings ({self.get_name()}): {len(ratings)} vs {totalUncorrelatedRatings}"
     )
@@ -886,7 +896,7 @@ class GaussianScorer(Scorer):
       )
       noteScoresPopulationSampled = None
 
-    gc.collect()
+    _release_memory()
     try:
       noteScores, userScores = self._score_notes_and_users(
         ratings=ratings,

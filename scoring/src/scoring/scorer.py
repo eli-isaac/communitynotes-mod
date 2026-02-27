@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+import ctypes
 import gc
 import logging
 import time
@@ -12,6 +13,15 @@ from .pandas_utils import keep_columns
 import numpy as np
 import pandas as pd
 import torch
+
+
+def _release_memory():
+  """gc.collect() + malloc_trim to return freed pages to the OS."""
+  gc.collect()
+  try:
+    ctypes.CDLL("libc.so.6").malloc_trim(0)
+  except OSError:
+    pass
 
 
 logger = logging.getLogger("birdwatch.scorer")
@@ -329,7 +339,7 @@ class Scorer(ABC):
         # Only remove ratings if we're running in parallel, since otherwise later scorers will
         # need the ratings.
         del scoringArgs.ratings
-        gc.collect()
+        _release_memory()
 
       # If there are no ratings left after filtering, then return empty dataframes.
       if len(ratings) == 0:
@@ -346,7 +356,7 @@ class Scorer(ABC):
     # Returning should remove references to ratings, but manually trigger GC just to reclaim
     # resources as soon as possible.
     del ratings
-    gc.collect()
+    _release_memory()
     # Return dataframes with specified columns in specified order
     # Reindex fills required columns with NaN if they aren't present in the original df.
     scoredNotes = noteScores.reindex(

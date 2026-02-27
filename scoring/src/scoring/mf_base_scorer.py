@@ -535,7 +535,7 @@ class MFBaseScorer(Scorer):
       del scoredNotes, crhNotes
       thresholds = tag_filter.get_tag_thresholds(crhStats, self._tagFilterPercentile)
       del crhStats
-      gc.collect()
+      _release_memory()
     return thresholds
 
   def _prescore_notes_and_users(
@@ -819,7 +819,7 @@ class MFBaseScorer(Scorer):
         )
       if not self._saveIntermediateState:
         del ratingsHelpfulnessScoreFilteredPreHarassmentFilter
-        gc.collect()
+        _release_memory()
 
       # Assigns contributor (author & rater) helpfulness bit based on (1) performance
       # authoring and reviewing previous and current notes, and (2) including an extra
@@ -858,7 +858,7 @@ class MFBaseScorer(Scorer):
         del validRatings
         del scoredNotes
         del helpfulnessScoresPreHarassmentFilter
-        gc.collect()
+        _release_memory()
       if self._saveIntermediateState:
         self.helpfulnessScores = helpfulnessScores
 
@@ -880,7 +880,7 @@ class MFBaseScorer(Scorer):
         )
         if not self._saveIntermediateState:
           del ratingsForTraining
-          gc.collect()
+          _release_memory()
         noteParams, raterParams, globalBias = self._mfRanker.run_mf(
           ratings=finalRoundRatings[[c.noteIdKey, c.raterParticipantIdKey, c.helpfulNumKey]],
           noteInit=noteParamsUnfiltered[
@@ -1012,7 +1012,7 @@ class MFBaseScorer(Scorer):
     )
 
     del scoredNotes, finalRoundRatings
-    gc.collect()
+    _release_memory()
 
     # Compute user incorrect tag aggregates
     userIncorrectTagUsageDf = get_user_incorrect_ratio(
@@ -1072,7 +1072,7 @@ class MFBaseScorer(Scorer):
     noteModelOutput = noteParams
     del ratings, noteParamsUnfiltered, raterParamsUnfiltered
     del noteParams, raterParams, helpfulnessScores, userIncorrectTagUsageDf
-    gc.collect()
+    _release_memory()
     return noteModelOutput, raterModelOutput, metaOutput
 
   def _score_notes_and_users(
@@ -1143,7 +1143,7 @@ class MFBaseScorer(Scorer):
       )
       if not self._saveIntermediateState:
         del ratingsForTraining
-        gc.collect()
+        _release_memory()
       if self._saveIntermediateState:
         self.finalRoundRatings = finalRoundRatings
 

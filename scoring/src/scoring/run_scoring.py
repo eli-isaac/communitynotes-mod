@@ -6,6 +6,7 @@ intergrated into main files for execution in internal and external environments.
 """
 import concurrent.futures
 import copy
+import ctypes
 import gc
 import io
 from itertools import chain
@@ -507,6 +508,10 @@ def _run_scorers(
       )
       modelResultsAndTimes.append(result)
       gc.collect()
+      try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+      except OSError:
+        pass
 
   modelResultsTuple, scorerTimesTuple = zip(*modelResultsAndTimes)
 
